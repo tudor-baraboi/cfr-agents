@@ -1,0 +1,19 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["/assets/*", "*.js", "*.css", "*.ico", "*.png", "*.svg", "*.woff2"]
+  },
+  "routes": [
+    {
+      "route": "/admin",
+      "rewrite": "/index.html"
+    },
+    {
+      "route": "/infinity",
+      "rewrite": "/index.html"
+    }
+  ],
+  "globalHeaders": {
+    "Cache-Control": "no-cache"
+  }
+}

@@ -1,0 +1,38 @@
+[project]
+name = "faa-agent-backend"
+version = "0.1.0"
+description = "FAA Certification Agent - Backend API"
+requires-python = ">=3.11"
+
+dependencies = [
+    # FastAPI Core
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    
+    # Anthropic Claude API
+    "anthropic>=0.40.0",
+    
+    # HTTP Client for external APIs (eCFR, DRS)
+    "httpx>=0.28.0",
+    
+    # Configuration
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.0",
+    
+    # Logging
+    "python-json-logger>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
