@@ -59,9 +59,10 @@ const Login: Component<LoginProps> = (props) => {
 
       const data: FingerprintResponse = await response.json();
       
-      // Store token and admin status in sessionStorage
+      // Store token, admin status, and fingerprint in sessionStorage
       sessionStorage.setItem(`${branding.sessionStoragePrefix}-auth-token`, data.token);
       sessionStorage.setItem(`${branding.sessionStoragePrefix}-is-admin`, data.is_admin ? 'true' : 'false');
+      sessionStorage.setItem(`${branding.sessionStoragePrefix}-fingerprint`, visitorId);
       
       // Notify parent
       props.onLogin({
@@ -70,6 +71,7 @@ const Login: Component<LoginProps> = (props) => {
         requestsUsed: data.requests_used,
         requestsRemaining: data.requests_remaining,
         dailyLimit: data.daily_limit,
+        fingerprint: visitorId,
       });
     } catch (err) {
       console.error('Auto-auth error:', err);
@@ -92,13 +94,26 @@ const Login: Component<LoginProps> = (props) => {
     }
 
     try {
+      // For infinity mode, get fingerprint BEFORE sending request so it can be included in JWT
+      let fingerprint: string | undefined;
+      if (mode() === 'infinity') {
+        try {
+          fingerprint = await getVisitorId();
+        } catch (fpError) {
+          console.warn('Failed to get fingerprint for infinity mode:', fpError);
+        }
+      }
+
       const baseUrl = API_URL || window.location.origin;
       const response = await fetch(`${baseUrl}/auth/validate-code`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ code: trimmedCode }),
+        body: JSON.stringify({ 
+          code: trimmedCode,
+          fingerprint: fingerprint,  // Include fingerprint for My Documents feature
+        }),
       });
 
       if (!response.ok) {
@@ -113,6 +128,11 @@ const Login: Component<LoginProps> = (props) => {
       // Store token in sessionStorage (use separate key for admin routes)
       sessionStorage.setItem(`${branding.sessionStoragePrefix}-admin-token`, data.token);
       
+      // Also store fingerprint in sessionStorage for My Documents feature
+      if (fingerprint) {
+        sessionStorage.setItem(`${branding.sessionStoragePrefix}-fingerprint`, fingerprint);
+      }
+      
       // Notify parent
       props.onLogin({
         token: data.token,
@@ -120,6 +140,7 @@ const Login: Component<LoginProps> = (props) => {
         requestsUsed: data.requests_used,
         requestsRemaining: data.requests_remaining ?? 0,
         dailyLimit: 0,  // Admin has unlimited
+        fingerprint,
       });
     } catch (err) {
       console.error('Login error:', err);

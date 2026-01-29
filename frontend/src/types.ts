@@ -6,6 +6,11 @@ export interface TextEvent {
   content: string;
 }
 
+export interface ThinkingEvent {
+  type: 'thinking';
+  content: string;
+}
+
 export interface ToolUseEvent {
   type: 'tool_use';
   name: string;
@@ -34,6 +39,16 @@ export interface ErrorEvent {
   content: string;
 }
 
+export interface WarningEvent {
+  type: 'warning';
+  content: string;
+}
+
+export interface ClearTextEvent {
+  type: 'clear_text';
+  chars: number;
+}
+
 export interface DoneEvent {
   type: 'done';
 }
@@ -51,11 +66,14 @@ export interface QuotaUpdateEvent {
 
 export type WebSocketEvent =
   | TextEvent
+  | ThinkingEvent
   | ToolUseEvent
   | ToolInputEvent
   | ToolExecutingEvent
   | ToolResultEvent
   | ErrorEvent
+  | WarningEvent
+  | ClearTextEvent
   | DoneEvent
   | PingEvent
   | QuotaUpdateEvent;
@@ -72,12 +90,14 @@ export interface ToolCall {
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
+  thinking?: string;  // Extended Thinking: Claude's reasoning process
   toolCalls?: ToolCall[];
   citations?: string[];
   timestamp: Date;
   isStreaming?: boolean;
+  isWarning?: boolean;  // Context limit warning
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected';
@@ -91,6 +111,7 @@ export interface AuthState {
   requestsUsed: number;
   requestsRemaining: number;
   dailyLimit: number;
+  fingerprint?: string;
 }
 
 export interface ValidateCodeResponse {

@@ -5,6 +5,8 @@ Uses FingerprintJS visitor IDs as rate limit keys.
 Quotas reset daily (partition by date).
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timezone
 from typing import Optional

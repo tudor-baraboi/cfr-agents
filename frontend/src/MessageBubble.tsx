@@ -9,41 +9,6 @@ marked.setOptions({
   gfm: true,
 });
 
-/**
- * Splits content into thinking (pre-response reasoning) and response (actual markdown)
- * The response typically starts with a heading (# or ##) or a clear paragraph break
- */
-function splitThinkingAndResponse(content: string): { thinking: string; response: string } {
-  if (!content) return { thinking: '', response: '' };
-  
-  // Look for markdown structure that indicates the "real" response is starting
-  // Common patterns: headings, bullet lists after blank line, or clear paragraph breaks
-  const responsePatterns = [
-    /\n\n##?\s+[A-Z]/,           // Heading starting with capital letter
-    /\n\n\*\*[A-Z][^*]+\*\*/,   // Bold text starting paragraph  
-    /\n\n(?:The |Based on |According to |Here |I found )/,  // Common response starters
-    /\n\n(?:1\.|•|-)\s+/,       // Numbered or bulleted list
-  ];
-  
-  for (const pattern of responsePatterns) {
-    const match = content.match(pattern);
-    if (match && match.index !== undefined) {
-      return {
-        thinking: content.slice(0, match.index).trim(),
-        response: content.slice(match.index).trim(),
-      };
-    }
-  }
-  
-  // No clear split found - if content has markdown structure, treat it all as response
-  if (content.match(/^##?\s+|^\*\*|^(?:1\.|•|-)\s+/m)) {
-    return { thinking: '', response: content };
-  }
-  
-  // Otherwise it's all thinking (still waiting for response)
-  return { thinking: content, response: '' };
-}
-
 interface MessageBubbleProps {
   message: Message;
   question?: string; // The user's question (for assistant messages)
@@ -212,10 +177,14 @@ const MessageBubble: Component<MessageBubbleProps> = (props) => {
   const isStreaming = () => props.message.isStreaming ?? false;
   const hasContent = () => !!props.message.content;
   
-  // Split content into thinking and response parts
-  const contentParts = createMemo(() => splitThinkingAndResponse(props.message.content || ''));
-  const hasThinking = () => contentParts().thinking.length > 0;
-  const hasResponse = () => contentParts().response.length > 0;
+  // Extended Thinking with interleaved thinking provides clean separation:
+  // - message.thinking = Claude's internal reasoning (thinking blocks)
+  // - message.content = User-facing response (text blocks)
+  const reasoning = () => props.message.thinking || '';
+  const response = () => props.message.content || '';
+  
+  const hasReasoning = () => reasoning().length > 0;
+  const hasResponse = () => response().length > 0;
   
   // Can export if assistant message with response content, not streaming, and has a question
   const canExport = () => 
@@ -231,7 +200,7 @@ const MessageBubble: Component<MessageBubbleProps> = (props) => {
     try {
       await exportToPdf({
         question: props.question!,
-        response: contentParts().response,
+        response: response(),  // Export the user-facing response
         citations: props.message.citations,
         timestamp: props.message.timestamp,
       });
@@ -247,7 +216,7 @@ const MessageBubble: Component<MessageBubbleProps> = (props) => {
       <div class="message-content">
         <Show when={props.message.role === 'assistant'}>
           <Show 
-            when={hasContent()} 
+            when={hasContent() || hasReasoning()} 
             fallback={
               <Show when={isStreaming()}>
                 <div class="thinking-indicator">
@@ -258,22 +227,22 @@ const MessageBubble: Component<MessageBubbleProps> = (props) => {
               </Show>
             }
           >
-            {/* Show thinking process - collapsed once response starts */}
+            {/* Show Extended Thinking reasoning - collapsed once response starts */}
             <ThinkingDisplay 
-              content={contentParts().thinking} 
+              content={reasoning()} 
               isCollapsed={hasResponse()} 
             />
             
-            {/* Show actual response */}
+            {/* Show user-facing response */}
             <Show when={hasResponse()}>
               <StreamingMarkdown 
-                content={contentParts().response} 
+                content={response()} 
                 isStreaming={isStreaming()} 
               />
             </Show>
             
-            {/* If only thinking (no response yet), show streaming cursor */}
-            <Show when={hasThinking() && !hasResponse() && isStreaming()}>
+            {/* If only reasoning (no response yet), show streaming cursor */}
+            <Show when={hasReasoning() && !hasResponse() && isStreaming()}>
               <div class="streaming-cursor" />
             </Show>
           </Show>
@@ -292,6 +261,11 @@ const MessageBubble: Component<MessageBubbleProps> = (props) => {
         </Show>
         <Show when={props.message.role === 'user'}>
           <div class="user-content">{props.message.content}</div>
+        </Show>
+        <Show when={props.message.role === 'system'}>
+          <div class={`system-content ${props.message.isWarning ? 'warning' : ''}`}>
+            {props.message.content}
+          </div>
         </Show>
       </div>
       

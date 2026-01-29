@@ -1,6 +1,9 @@
 """
 Feedback service for collecting user feedback with logs stored in Azure Blob Storage.
 """
+
+from __future__ import annotations
+
 import logging
 import uuid
 from datetime import datetime, timezone

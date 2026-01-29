@@ -16,6 +16,12 @@ from app.tools.drs import (
     SEARCH_DRS_DEFINITION,
     FETCH_DRS_DOCUMENT_DEFINITION,
 )
+from app.tools.documents import (
+    list_my_documents,
+    delete_my_document,
+    LIST_MY_DOCUMENTS_DEFINITION,
+    DELETE_MY_DOCUMENT_DEFINITION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     FETCH_CFR_TOOL,  # Fetch specific CFR sections
     SEARCH_DRS_DEFINITION,  # Search DRS for Advisory Circulars
     FETCH_DRS_DOCUMENT_DEFINITION,  # Fetch specific DRS documents
+    LIST_MY_DOCUMENTS_DEFINITION,  # List user's uploaded documents
+    DELETE_MY_DOCUMENT_DEFINITION,  # Delete user's uploaded documents
 ]
 
 # Tool implementations: name -> async function
@@ -34,6 +42,8 @@ _TOOL_IMPLEMENTATIONS: dict[str, Any] = {
     "fetch_cfr_section": fetch_cfr_section,
     "search_drs": search_drs,
     "fetch_drs_document": fetch_drs_document,
+    "list_my_documents": list_my_documents,
+    "delete_my_document": delete_my_document,
 }
 
 

@@ -10,8 +10,11 @@ Implements cache-first pattern:
 3. If not cached: fetch from API, store in cache, return content
 """
 
+from __future__ import annotations
+
 import logging
 import re
+from typing import Optional
 
 import httpx
 
@@ -26,8 +29,8 @@ async def fetch_cfr_section(
     part: int,
     section: str,
     title: int = 14,
-    date: str | None = None,
-    index_name: str | None = None,
+    date: Optional[str] = None,
+    index_name: Optional[str] = None,
 ) -> str:
     """
     Fetch a CFR section from the eCFR API.

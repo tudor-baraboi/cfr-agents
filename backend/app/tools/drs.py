@@ -9,8 +9,10 @@ Implements cache-first pattern for fetch_drs_document:
 3. If not cached: fetch from API, store in cache, return content
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any
+from typing import Any, Optional, List
 
 import httpx
 

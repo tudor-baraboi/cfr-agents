@@ -4,6 +4,7 @@ import MessageBubble from './MessageBubble';
 import Login from './Login';
 import FeedbackModal from './FeedbackModal';
 import AdminDashboard from './AdminDashboard';
+import MyDocumentsPanel from './MyDocumentsPanel';
 import type { ConnectionStatus, AuthState, QuotaExhaustedState } from './types';
 import { branding, exampleQueries } from './config';
 import { logger } from './logger';
@@ -120,44 +121,20 @@ const ChatInterface: Component<{
 }> = (props) => {
   const store = createChatStore(props.auth.token!, props.onQuotaExhausted, props.onQuotaUpdate, props.onAuthFailed);
   const [inputValue, setInputValue] = createSignal('');
-  const [userHasScrolledUp, setUserHasScrolledUp] = createSignal(false);
   let messagesContainer: HTMLDivElement | undefined;
   let inputField: HTMLTextAreaElement | undefined;
   
-  // Check if user is near the bottom (within 100px)
-  const isNearBottom = () => {
-    if (!messagesContainer) return true;
-    const threshold = 100;
-    return messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
-  };
-  
-  // Auto-scroll to bottom when new messages arrive (only if user hasn't scrolled up)
+  // Simple scroll to bottom
   const scrollToBottom = () => {
-    if (messagesContainer && !userHasScrolledUp()) {
+    if (messagesContainer) {
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
   };
   
-  // Handle user scroll - detect if they've scrolled up from bottom
-  const handleScroll = () => {
-    if (messagesContainer) {
-      // If user scrolled up, stop auto-scrolling
-      if (!isNearBottom()) {
-        setUserHasScrolledUp(true);
-      } else {
-        // If they're back at bottom, resume auto-scroll
-        setUserHasScrolledUp(false);
-      }
-    }
-  };
-  
-  // Watch for message changes and scroll
   onMount(() => {
-    // Use MutationObserver to detect DOM changes
     if (messagesContainer) {
       const observer = new MutationObserver(scrollToBottom);
       observer.observe(messagesContainer, { childList: true, subtree: true, characterData: true });
-      messagesContainer.addEventListener('scroll', handleScroll);
     }
   });
   
@@ -165,11 +142,8 @@ const ChatInterface: Component<{
     e.preventDefault();
     const value = inputValue().trim();
     if (value && !store.isLoading()) {
-      // Reset scroll state when sending a new message - auto-scroll should resume
-      setUserHasScrolledUp(false);
       store.sendMessage(value);
       setInputValue('');
-      // Reset textarea height
       if (inputField) {
         inputField.style.height = 'auto';
       }
@@ -259,6 +233,14 @@ const ChatInterface: Component<{
           </button>
         </form>
       </div>
+      
+      {/* FAB for My Documents - renders as fixed positioned overlay */}
+      <Show when={props.auth.fingerprint}>
+        <MyDocumentsPanel 
+          token={props.auth.token!} 
+          fingerprint={props.auth.fingerprint!} 
+        />
+      </Show>
     </div>
   );
 };
@@ -278,6 +260,7 @@ const App: Component = () => {
       ? `${branding.sessionStoragePrefix}-auth-token`
       : `${branding.sessionStoragePrefix}-admin-token`;
     const token = sessionStorage.getItem(storageKey);
+    const fingerprint = sessionStorage.getItem(`${branding.sessionStoragePrefix}-fingerprint`) || undefined;
     
     if (token) {
       const isAdmin = route !== 'chat' || sessionStorage.getItem(`${branding.sessionStoragePrefix}-is-admin`) === 'true';
@@ -288,6 +271,7 @@ const App: Component = () => {
         requestsUsed: 0,
         requestsRemaining: isAdmin ? 999 : 15,
         dailyLimit: isAdmin ? 0 : 15,
+        fingerprint,
       });
     }
   });

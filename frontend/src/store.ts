@@ -191,10 +191,12 @@ export function createChatStore(
   // Current streaming message state
   let currentMessageIndex: number = -1;
   let currentContent = '';
+  let currentThinking = '';  // Extended Thinking: reasoning content
   let currentToolCalls: ToolCall[] = [];
   
   // Batching for text updates - accumulate content and flush periodically
   let pendingContent = '';
+  let pendingThinking = '';  // Extended Thinking: pending reasoning content
   let flushScheduled = false;
   
   const ws = createWebSocket(conversationId, token);
@@ -220,11 +222,19 @@ export function createChatStore(
   });
   
   function flushContent() {
-    if (pendingContent && currentMessageIndex >= 0) {
-      currentContent += pendingContent;
-      pendingContent = '';
-      // Use produce for surgical update - only updates the content field
-      setMessages(currentMessageIndex, 'content', currentContent);
+    if (currentMessageIndex >= 0) {
+      // Flush thinking content (Extended Thinking)
+      if (pendingThinking) {
+        currentThinking += pendingThinking;
+        pendingThinking = '';
+        setMessages(currentMessageIndex, 'thinking', currentThinking);
+      }
+      // Flush text content
+      if (pendingContent) {
+        currentContent += pendingContent;
+        pendingContent = '';
+        setMessages(currentMessageIndex, 'content', currentContent);
+      }
     }
     flushScheduled = false;
   }
@@ -241,9 +251,13 @@ export function createChatStore(
   let totalChars = 0;
   
   ws.onEvent((event: WebSocketEvent) => {
-    logger.debug('store', `Event received: ${event.type}`, event.type === 'text' ? { chars: event.content.length } : undefined);
+    logger.debug('store', `Event received: ${event.type}`, event.type === 'text' || event.type === 'thinking' ? { chars: event.content.length } : undefined);
     
     switch (event.type) {
+      case 'thinking':
+        // Extended Thinking: handle reasoning content
+        handleThinkingEvent(event.content);
+        break;
       case 'text':
         totalChunks++;
         totalChars += event.content.length;
@@ -261,6 +275,12 @@ export function createChatStore(
       case 'error':
         handleError(event.content);
         break;
+      case 'warning':
+        handleWarning(event.content);
+        break;
+      case 'clear_text':
+        handleClearText(event.chars);
+        break;
       case 'done':
         handleDone();
         break;
@@ -274,6 +294,7 @@ export function createChatStore(
         id: generateId(),
         role: 'assistant',
         content: '',
+        thinking: '',  // Extended Thinking: reasoning content
         toolCalls: [],
         timestamp: new Date(),
         isStreaming: true,
@@ -281,6 +302,7 @@ export function createChatStore(
       
       currentMessageIndex = messages.length;
       currentContent = '';
+      currentThinking = '';
       currentToolCalls = [];
       
       setMessages(produce((msgs) => {
@@ -290,6 +312,38 @@ export function createChatStore(
     
     // Batch content updates
     pendingContent += content;
+    scheduleFlush();
+  }
+  
+  /**
+   * Extended Thinking: Handle reasoning/thinking content from Claude
+   * This comes before text content and shows Claude's thought process
+   */
+  function handleThinkingEvent(content: string) {
+    if (currentMessageIndex < 0) {
+      // Start new assistant message (thinking can come first)
+      const newMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: '',
+        thinking: '',  // Extended Thinking: reasoning content
+        toolCalls: [],
+        timestamp: new Date(),
+        isStreaming: true,
+      };
+      
+      currentMessageIndex = messages.length;
+      currentContent = '';
+      currentThinking = '';
+      currentToolCalls = [];
+      
+      setMessages(produce((msgs) => {
+        msgs.push(newMessage);
+      }));
+    }
+    
+    // Batch thinking updates (same batching as text for smooth streaming)
+    pendingThinking += content;
     scheduleFlush();
   }
   
@@ -358,6 +412,38 @@ export function createChatStore(
     setIsLoading(false);
   }
   
+  function handleWarning(content: string) {
+    // Show warning as a system message that doesn't interrupt the flow
+    logger.warn('store', 'handleWarning', { content });
+    
+    // Add warning as a distinct message
+    setMessages(produce((msgs) => {
+      msgs.push({
+        id: generateId(),
+        role: 'system',
+        content: content,
+        timestamp: new Date(),
+        isWarning: true,
+      });
+    }));
+  }
+  
+  function handleClearText(chars: number) {
+    // Remove the last N characters from the current message content
+    // This is used to remove meta-commentary that was streamed before we knew a tool_use was coming
+    logger.info('store', 'handleClearText', { chars, currentContentLength: currentContent.length });
+    
+    if (currentMessageIndex >= 0 && currentContent.length > 0) {
+      // Remove from our tracking
+      currentContent = currentContent.slice(0, -chars);
+      pendingContent = ''; // Clear any pending content too
+      
+      // Update the message in the store
+      setMessages(currentMessageIndex, 'content', currentContent);
+      logger.debug('store', 'Cleared meta-commentary', { newLength: currentContent.length });
+    }
+  }
+  
   function handleDone() {
     // Flush any remaining content
     flushContent();
@@ -400,6 +486,27 @@ export function createChatStore(
         content: content.trim(),
         timestamp: new Date(),
       });
+    }));
+    
+    // Immediately create an empty streaming assistant message
+    // This shows the typing indicator while waiting for first response
+    const newMessage: Message = {
+      id: generateId(),
+      role: 'assistant',
+      content: '',
+      thinking: '',
+      toolCalls: [],
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+    
+    currentMessageIndex = messages.length;
+    currentContent = '';
+    currentThinking = '';
+    currentToolCalls = [];
+    
+    setMessages(produce((msgs) => {
+      msgs.push(newMessage);
     }));
     
     setIsLoading(true);

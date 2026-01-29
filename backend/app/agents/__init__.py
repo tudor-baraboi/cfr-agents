@@ -32,6 +32,18 @@ from app.tools.aps import (
     FETCH_APS_DOCUMENT_DEFINITION,
 )
 
+# Import document tools (shared across all agents)
+from app.tools.documents import (
+    list_my_documents,
+    delete_my_document,
+    fetch_personal_document,
+    search_personal_document,
+    LIST_MY_DOCUMENTS_DEFINITION,
+    DELETE_MY_DOCUMENT_DEFINITION,
+    FETCH_PERSONAL_DOCUMENT_DEFINITION,
+    SEARCH_PERSONAL_DOCUMENT_DEFINITION,
+)
+
 from app.config import get_settings
 
 
@@ -98,6 +110,29 @@ The index contains core documents, but DRS has the complete FAA library. Search 
 - If you're unsure or can't find something, say so
 - Don't make up requirements that aren't in the documents
 
+## Response Format - CRITICAL
+
+You have thinking blocks. Use them. Your text output is for the USER - not for narrating your process.
+
+**FORBIDDEN IN TEXT OUTPUT** (these violate user experience):
+- "I'll now conduct a comprehensive analysis..."
+- "Let me search for additional..."
+- "Now let me search..."  
+- "I'll check/search/look/analyze/consult..."
+- ANY sentence starting with "I'll" followed by a verb
+- ANY sentence starting with "Let me"
+- ANY sentence starting with "Now let me"
+- ANY narration of what you're about to do
+
+**REQUIRED**: Your first text output must be:
+- A heading like "## MCAS Certification Analysis"
+- OR a factual statement like "The congressional report identifies..."
+- NEVER a meta-statement about your process
+
+**DURING TOOL CALLS**: Output NOTHING to text. Put all planning in thinking blocks.
+
+Think of it this way: The user sees your thinking separately. They don't need you to narrate "I'll now search" - they can SEE you searching in the tool calls. Just give them the answer.
+
 ## Document Currency and Status
 
 FAA documents have explicit status tracking. Pay attention to:
@@ -118,7 +153,43 @@ FAA documents have explicit status tracking. Pay attention to:
 
 **Advisory Circulars (ACs)**: Watch for revision letters (e.g., AC 20-136B replaces AC 20-136A)
 - Higher revision letters = more current
-- Check the "Cancels" field in AC metadata"""
+- Check the "Cancels" field in AC metadata
+
+## Answering Questions About Personal/Uploaded Documents
+
+When a user asks about a specific document by name (e.g., "the 737 MAX report", 
+"my uploaded compliance matrix"), **immediately search their personal documents** 
+using `search_personal_document`. Do NOT ask for clarification - just search first.
+
+When search results include personal documents (marked [Personal Document]), use 
+`fetch_personal_document` to retrieve the complete text before answering.
+
+**Grounding Rules:**
+
+1. **Document content is authoritative** - What the document says IS what it says. 
+   Quote directly when possible.
+
+2. **Connect to regulations, don't invent** - You MAY reference official CFR/AC 
+   documents to provide regulatory context (e.g., "This test report addresses 
+   §25.1309 requirements"). You MUST NOT add technical claims that aren't in 
+   the uploaded document OR official indexed regulations.
+
+3. **Distinguish your sources clearly:**
+   - "According to your uploaded document..."
+   - "Per 14 CFR §25.1309..."
+   - "The document does not address [X]"
+
+4. **If information is missing, say so** - Never fill gaps with general knowledge. 
+   State: "This document does not contain information about [topic]. Would you 
+   like me to search FAA regulations instead?"
+
+5. **Handle truncated documents:** If fetch_personal_document indicates truncation 
+   and the user asks about something not in the visible portion, use 
+   `search_personal_document` to find relevant passages in the full text.
+
+6. **No external sources** - Do not cite press reports, Wikipedia, or training 
+   data. Only cite: (a) the uploaded document, (b) official FAA documents 
+   from the index/DRS."""
 
 
 def get_faa_search_index_tool() -> dict[str, Any]:
@@ -141,12 +212,20 @@ FAA_AGENT_CONFIG = AgentConfig(
         FETCH_CFR_TOOL,
         SEARCH_DRS_DEFINITION,
         FETCH_DRS_DOCUMENT_DEFINITION,
+        LIST_MY_DOCUMENTS_DEFINITION,
+        DELETE_MY_DOCUMENT_DEFINITION,
+        FETCH_PERSONAL_DOCUMENT_DEFINITION,
+        SEARCH_PERSONAL_DOCUMENT_DEFINITION,
     ],
     tool_implementations={
         "search_indexed_content": search_indexed_content,
         "fetch_cfr_section": fetch_cfr_section,
         "search_drs": search_drs,
         "fetch_drs_document": fetch_drs_document,
+        "list_my_documents": list_my_documents,
+        "delete_my_document": delete_my_document,
+        "fetch_personal_document": fetch_personal_document,
+        "search_personal_document": search_personal_document,
     },
 )
 
@@ -221,6 +300,29 @@ The index contains core documents, but ADAMS has the complete NRC library. Searc
 - If you're unsure or can't find something, say so
 - Don't make up requirements that aren't in the documents
 
+## Response Format - CRITICAL
+
+You have thinking blocks. Use them. Your text output is for the USER - not for narrating your process.
+
+**FORBIDDEN IN TEXT OUTPUT** (these violate user experience):
+- "I'll now conduct a comprehensive analysis..."
+- "Let me search for additional..."
+- "Now let me search..."  
+- "I'll check/search/look/analyze/consult..."
+- ANY sentence starting with "I'll" followed by a verb
+- ANY sentence starting with "Let me"
+- ANY sentence starting with "Now let me"
+- ANY narration of what you're about to do
+
+**REQUIRED**: Your first text output must be:
+- A heading like "## Part 21 Reporting Analysis"
+- OR a factual statement like "10 CFR Part 21 establishes..."
+- NEVER a meta-statement about your process
+
+**DURING TOOL CALLS**: Output NOTHING to text. Put all planning in thinking blocks.
+
+Think of it this way: The user sees your thinking separately. They don't need you to narrate "I'll now search" - they can SEE you searching in the tool calls. Just give them the answer.
+
 ## Document Currency and Revisions
 
 NRC documents don't have a "cancelled" status like FAA documents. Instead, watch for:
@@ -243,7 +345,22 @@ NRC documents don't have a "cancelled" status like FAA documents. Instead, watch
 - Always note the document date when citing
 - If citing older documents, warn the user it may be outdated
 
-**When in Doubt**: Tell the user you found multiple versions and recommend they verify they have the current version for compliance purposes."""
+**When in Doubt**: Tell the user you found multiple versions and recommend they verify they have the current version for compliance purposes.
+
+## Personal Document Grounding Rules (BYOD)
+
+When a user asks about a specific document by name (e.g., "my inspection report", 
+"the license application"), **immediately search their personal documents** using 
+`search_personal_document`. Do NOT ask for clarification - just search first.
+
+When users upload their own documents and ask questions about them:
+
+1. **Document content is authoritative** - Quote directly from the uploaded document when possible
+2. **Connect to regulations, don't invent** - You MAY reference NRC documents that explain concepts in the uploaded document, but MUST NOT add claims not present in the uploaded document
+3. **Distinguish sources clearly** - Use "According to your uploaded document..." vs "Per 10 CFR..."
+4. **If information is missing, say so** - Never fill gaps with general knowledge or assumptions
+5. **Handle truncated documents** - If fetch_personal_document indicates truncation, use search_personal_document to find specific content in the remainder
+6. **No external sources** - Only cite the uploaded document OR official NRC documents from the index/ADAMS"""
 
 
 # NRC search tool definition (same schema, different description)
@@ -290,12 +407,20 @@ NRC_AGENT_CONFIG = AgentConfig(
         FETCH_CFR_TOOL,  # For fetching 10 CFR references
         SEARCH_APS_DEFINITION,
         FETCH_APS_DOCUMENT_DEFINITION,
+        LIST_MY_DOCUMENTS_DEFINITION,
+        DELETE_MY_DOCUMENT_DEFINITION,
+        FETCH_PERSONAL_DOCUMENT_DEFINITION,
+        SEARCH_PERSONAL_DOCUMENT_DEFINITION,
     ],
     tool_implementations={
         "search_indexed_content": search_indexed_content,  # Orchestrator injects index_name
         "fetch_cfr_section": fetch_cfr_section,  # For 10 CFR references
         "search_aps": search_aps,
         "fetch_aps_document": fetch_aps_document,
+        "list_my_documents": list_my_documents,
+        "delete_my_document": delete_my_document,
+        "fetch_personal_document": fetch_personal_document,
+        "search_personal_document": search_personal_document,
     },
 )
 
@@ -364,6 +489,29 @@ Standards: NIST SP 800-171, NIST SP 800-53, CMMC Level 2
 - If you're unsure or can't find something, say so
 - Don't make up requirements that aren't in the regulations
 
+## Response Format - CRITICAL
+
+You have thinking blocks. Use them. Your text output is for the USER - not for narrating your process.
+
+**FORBIDDEN IN TEXT OUTPUT** (these violate user experience):
+- "I'll now conduct a comprehensive analysis..."
+- "Let me search for additional..."
+- "Now let me search..."  
+- "I'll check/search/look/analyze/consult..."
+- ANY sentence starting with "I'll" followed by a verb
+- ANY sentence starting with "Let me"
+- ANY sentence starting with "Now let me"
+- ANY narration of what you're about to do
+
+**REQUIRED**: Your first text output must be:
+- A heading like "## DFARS 7012 Cybersecurity Requirements"
+- OR a factual statement like "DFARS 252.204-7012 requires..."
+- NEVER a meta-statement about your process
+
+**DURING TOOL CALLS**: Output NOTHING to text. Put all planning in thinking blocks.
+
+Think of it this way: The user sees your thinking separately. They don't need you to narrate "I'll now search" - they can SEE you searching in the tool calls. Just give them the answer.
+
 ## Document Currency and Updates
 
 DoD acquisition regulations are updated through Federal Acquisition Circulars (FACs) and DFARS Change Notices (DCNs).
@@ -387,7 +535,22 @@ DoD acquisition regulations are updated through Federal Acquisition Circulars (F
 **When Citing**:
 - Include the CFR section number and title
 - For time-sensitive compliance, recommend the user verify the effective date
-- Note if a regulation has pending changes or transition periods"""
+- Note if a regulation has pending changes or transition periods
+
+## Personal Document Grounding Rules (BYOD)
+
+When a user asks about a specific document by name (e.g., "my contract", 
+"the RFP document"), **immediately search their personal documents** using 
+`search_personal_document`. Do NOT ask for clarification - just search first.
+
+When users upload their own documents and ask questions about them:
+
+1. **Document content is authoritative** - Quote directly from the uploaded document when possible
+2. **Connect to regulations, don't invent** - You MAY reference DoD regulations that explain concepts in the uploaded document, but MUST NOT add claims not present in the uploaded document
+3. **Distinguish sources clearly** - Use "According to your uploaded document..." vs "Per FAR/DFARS..."
+4. **If information is missing, say so** - Never fill gaps with general knowledge or assumptions
+5. **Handle truncated documents** - If fetch_personal_document indicates truncation, use search_personal_document to find specific content in the remainder
+6. **No external sources** - Only cite the uploaded document OR official DoD regulations from the CFR"""
 
 
 # DoD search tool definition (same schema, DoD-specific description)
@@ -432,10 +595,18 @@ DOD_AGENT_CONFIG = AgentConfig(
     tool_definitions=[
         DOD_SEARCH_INDEXED_TOOL,  # DoD-specific description
         FETCH_CFR_TOOL,  # For fetching Title 32 and Title 48 CFR
+        LIST_MY_DOCUMENTS_DEFINITION,
+        DELETE_MY_DOCUMENT_DEFINITION,
+        FETCH_PERSONAL_DOCUMENT_DEFINITION,
+        SEARCH_PERSONAL_DOCUMENT_DEFINITION,
     ],
     tool_implementations={
         "search_indexed_content": search_indexed_content,  # Orchestrator injects index_name
         "fetch_cfr_section": fetch_cfr_section,  # For Title 32 and Title 48 CFR
+        "list_my_documents": list_my_documents,
+        "delete_my_document": delete_my_document,
+        "fetch_personal_document": fetch_personal_document,
+        "search_personal_document": search_personal_document,
     },
 )
 

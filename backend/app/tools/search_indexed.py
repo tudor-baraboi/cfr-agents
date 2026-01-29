@@ -1,11 +1,12 @@
 """
-Search indexed FAA documents using Azure AI Search.
+Search indexed documents using the Search Proxy.
 
-Uses hybrid search (keyword + vector) for best results.
+The Search Proxy enforces fingerprint-based isolation for personal documents.
+All searches go through the proxy which adds the fingerprint filter.
 """
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -14,120 +15,74 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
-async def generate_query_embedding(query: str) -> list[float] | None:
-    """Generate embedding for search query using Azure AI Services Cohere model."""
-    settings = get_settings()
-    
-    if not settings.azure_ai_services_endpoint or not settings.azure_ai_services_key:
-        logger.warning("Azure AI Services not configured, falling back to keyword search")
-        return None
-    
-    # Azure AI Model Inference API format for Cohere
-    url = f"{settings.azure_ai_services_endpoint}/models/embeddings?api-version=2024-05-01-preview"
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.azure_ai_services_key}",
-                    "Content-Type": "application/json",
-                    "extra-parameters": "pass-through",
-                },
-                json={
-                    "input": [query[:8000]],
-                    "model": settings.azure_ai_services_embedding_deployment,
-                    "input_type": "query",  # Use 'query' for search queries
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["data"][0]["embedding"]
-        except Exception as e:
-            logger.warning(f"Failed to generate query embedding: {e}")
-            return None
-
-
 async def search_indexed_content(
     query: str,
     top_k: int = 5,
-    doc_type: str | None = None,
-    index_name: str | None = None,
+    doc_type: Optional[str] = None,
+    index_name: Optional[str] = None,
+    fingerprint: Optional[str] = None,
 ) -> str:
     """
-    Search indexed documents using hybrid search (keyword + vector).
+    Search indexed documents using the Search Proxy.
+    
+    The proxy enforces fingerprint filtering to isolate personal documents.
+    Results include regulatory documents (visible to all) + user's personal documents.
     
     Args:
         query: Search query (natural language)
         top_k: Number of results to return
         doc_type: Optional filter by document type ("cfr", "ac", etc.)
-        index_name: Optional override for search index (defaults to settings.azure_search_index)
+        index_name: Search index (e.g., "faa-agent", "nrc-agent", "dod-agent")
+        fingerprint: User's browser fingerprint (required for personal doc isolation)
     
     Returns:
         Formatted search results with citations.
     """
     settings = get_settings()
     
-    if not settings.azure_search_endpoint or not settings.azure_search_key:
-        return "Error: Azure AI Search not configured"
-    
-    endpoint = settings.azure_search_endpoint
+    # Determine index
     index = index_name or settings.azure_search_index
-    api_key = settings.azure_search_key
     
-    url = f"{endpoint}/indexes/{index}/docs/search?api-version=2024-07-01"
+    # Require fingerprint for search
+    if not fingerprint:
+        logger.warning("No fingerprint provided for search, using placeholder")
+        fingerprint = "anonymous-search-user"
     
-    # Build search request
-    search_body: dict[str, Any] = {
-        "search": query,
-        "top": top_k,
-        "select": "id,title,content,source,doc_type,citation",
-        "queryType": "simple",
+    # Build request for search proxy
+    search_request = {
+        "query": query,
+        "index": index,
+        "fingerprint": fingerprint,
+        "top": min(top_k, 20),  # Proxy max is 20
     }
     
-    # Add filter if doc_type specified
     if doc_type:
-        search_body["filter"] = f"doc_type eq '{doc_type}'"
+        search_request["doc_type"] = doc_type
     
-    # Generate embedding for hybrid search
-    query_embedding = await generate_query_embedding(query)
-    
-    if query_embedding:
-        # Use hybrid search (keyword + vector)
-        search_body["vectorQueries"] = [
-            {
-                "kind": "vector",
-                "vector": query_embedding,
-                "fields": "embedding",
-                "k": top_k,
-            }
-        ]
-        logger.info(f"Hybrid search: '{query}' (top_k={top_k}, doc_type={doc_type})")
-    else:
-        logger.info(f"Keyword-only search: '{query}' (top_k={top_k}, doc_type={doc_type})")
+    logger.info(f"Proxy search: '{query}' (index={index}, fingerprint={fingerprint[:8]}...)")
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.post(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "api-key": api_key,
-                },
-                json=search_body,
+                f"{settings.search_proxy_url}/search",
+                headers={"Content-Type": "application/json"},
+                json=search_request,
             )
             response.raise_for_status()
             data = response.json()
             
         except httpx.HTTPStatusError as e:
-            logger.error(f"Azure Search HTTP error: {e}")
+            logger.error(f"Search Proxy HTTP error: {e.response.status_code} - {e.response.text}")
             return f"Search error: HTTP {e.response.status_code}"
+        except httpx.ConnectError as e:
+            logger.error(f"Cannot connect to Search Proxy at {settings.search_proxy_url}: {e}")
+            return "Search error: Cannot connect to search service"
         except Exception as e:
-            logger.error(f"Azure Search error: {e}")
+            logger.error(f"Search Proxy error: {e}")
             return f"Search error: {e}"
     
     # Format results
-    results = data.get("value", [])
+    results = data.get("results", [])
     
     if not results:
         return f"No results found for: {query}"
@@ -139,12 +94,15 @@ async def search_indexed_content(
         citation = doc.get("citation", "")
         content = doc.get("content", "")[:500]  # Truncate for readability
         source = doc.get("source", "")
+        is_personal = doc.get("owner_fingerprint") is not None
         
         formatted.append(f"### {i}. {title}")
         if citation:
             formatted.append(f"**Citation:** {citation}")
         if source:
             formatted.append(f"**Source:** {source}")
+        if is_personal:
+            formatted.append("**[Personal Document]**")
         formatted.append(f"\n{content}...")
         formatted.append("")
     
@@ -154,17 +112,22 @@ async def search_indexed_content(
 # Tool definition for Claude API
 TOOL_DEFINITION = {
     "name": "search_indexed_content",
-    "description": """Search the indexed FAA documents (CFR sections, Advisory Circulars, etc.) for relevant information.
+    "description": """Search the indexed documents (CFR sections, Advisory Circulars, personal uploads, etc.) for relevant information.
 
-Use this tool FIRST when answering questions about FAA regulations. It searches the pre-indexed knowledge base for relevant content.
+Use this tool FIRST when answering questions about regulations. It searches the pre-indexed knowledge base for relevant content, including any documents the user has uploaded.
 
 When to use:
-- User asks a general question about FAA certification
+- User asks a general question about certification
 - Looking for relevant regulations on a topic
 - Finding Advisory Circulars related to a requirement
 - Before fetching specific CFR sections (to find which ones are relevant)
+- User asks about their uploaded documents
 
-The search returns document snippets with citations. If you need the complete text of a specific section found in results, use fetch_cfr_section.
+The search returns document snippets with citations. Results may include:
+- Regulatory documents (CFR, ACs, etc.) - visible to all users
+- Personal documents - only visible to the user who uploaded them
+
+If you need the complete text of a specific section found in results, use fetch_cfr_section.
 """,
     "input_schema": {
         "type": "object",
@@ -175,13 +138,13 @@ The search returns document snippets with citations. If you need the complete te
             },
             "top_k": {
                 "type": "integer",
-                "description": "Number of results to return (default: 5, max: 10)",
+                "description": "Number of results to return (default: 5, max: 20)",
                 "default": 5,
             },
             "doc_type": {
                 "type": "string",
                 "description": "Optional: filter by document type",
-                "enum": ["cfr", "ac", "order", "policy"],
+                "enum": ["cfr", "ac", "order", "policy", "user_upload"],
             },
         },
         "required": ["query"],

@@ -171,6 +171,139 @@ All agents (FAA, NRC, DoD) will have:
 
 Document upload is handled via dedicated API endpoint, not as a tool (too large for tool payload).
 
+#### `fetch_personal_document`
+
+Fetch the complete text of an uploaded personal document for grounding.
+
+**Parameters:**
+- `document_id` (required): Document ID from `list_my_documents` or search results
+- `fingerprint` (required): User's browser fingerprint (injected by orchestrator)
+
+**Behavior:**
+- Retrieves all chunks from the index and reassembles full document text
+- Caches full text in conversation memory for follow-up searches
+- Returns first 50,000 characters (~25 pages)
+- If truncated, appends message offering to search remainder
+
+**Returns:** Full document text with title header, or truncated text with search offer
+
+**Use case:** User asks detailed questions about an uploaded document. Agent fetches complete text to ensure accurate, grounded answers.
+
+#### `search_personal_document`
+
+Semantically search within a personal document for specific topics.
+
+**Parameters:**
+- `document_id` (required): Document ID
+- `query` (required): Topic or question to search for
+- `fingerprint` (required): User's browser fingerprint (injected by orchestrator)
+
+**Behavior:**
+- Reads full text from conversation memory cache (or fetches if not cached)
+- Splits text into paragraphs
+- Generates embeddings for query and paragraphs (Cohere embed-v3)
+- Returns top matching passages with ±1 paragraph context
+
+**Returns:** Up to 10,000 characters of relevant passages
+
+**Use case:** Document was truncated, user asks about topic not in visible portion. Agent searches full text semantically.
+
+---
+
+## Document Grounding (Anti-Hallucination)
+
+### Problem
+
+When users upload documents and ask questions about them, the agent may:
+1. Find partial matches in chunked search results
+2. Fill gaps using training data or general knowledge
+3. Confuse information from training data with document content
+4. Hallucinate details that sound plausible but aren't in the document
+
+For aerospace compliance, this is unacceptable. Every claim must be traceable to a source document.
+
+### Solution: Full Document Fetch + Semantic Search
+
+Instead of relying only on search result snippets, provide tools to retrieve and search the complete document text.
+
+### Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Initial fetch limit | 50,000 chars | ~25 pages, covers most docs fully |
+| Full text search limit | 100,000 chars | ~50 pages, handles large reports |
+| Search result limit | 10,000 chars | Focused excerpts, not full dump |
+| Search method | Semantic (Cohere embed-v3) | Finds related content, not just keywords |
+| Context window | ±1 paragraph | Preserves readability around matches |
+
+### Memory Cache
+
+Full document text is cached in conversation memory:
+
+| Aspect | Detail |
+|--------|--------|
+| Cache key | `personal_doc_{document_id}` |
+| Populated by | `fetch_personal_document` |
+| Read by | `search_personal_document` |
+| Scope | Single conversation |
+| Cleared | When conversation ends |
+
+### System Prompt Grounding Rules
+
+Added to all agent system prompts:
+
+```
+## Answering Questions About Personal/Uploaded Documents
+
+When search results include personal documents (marked [Personal Document]), use 
+`fetch_personal_document` to retrieve the complete text before answering.
+
+**Grounding Rules:**
+
+1. **Document content is authoritative** - What the document says IS what it says. 
+   Quote directly when possible.
+
+2. **Connect to regulations, don't invent** - You MAY reference official CFR/AC 
+   documents to provide regulatory context (e.g., "This test report addresses 
+   §25.1309 requirements"). You MUST NOT add technical claims that aren't in 
+   the uploaded document OR official indexed regulations.
+
+3. **Distinguish your sources clearly:**
+   - "According to your uploaded document..."
+   - "Per 14 CFR §25.1309..."
+   - "The document does not address [X]"
+
+4. **If information is missing, say so** - Never fill gaps with general knowledge. 
+   State: "This document does not contain information about [topic]. Would you 
+   like me to search FAA regulations instead?"
+
+5. **Handle truncated documents:** If fetch_personal_document indicates truncation 
+   and the user asks about something not in the visible portion, use 
+   `search_personal_document` to find relevant passages in the full text.
+
+6. **No external sources** - Do not cite press reports, Wikipedia, or training 
+   data. Only cite: (a) the uploaded document, (b) official regulatory documents 
+   from the index/DRS/APS.
+```
+
+### Comparison: Personal vs Regulatory Document Handling
+
+| Aspect | Regulatory (CFR/DRS) | Personal Documents |
+|--------|---------------------|-------------------|
+| Search | `search_indexed_content` (chunks) | `search_indexed_content` (chunks) |
+| Full fetch | `fetch_cfr_section`, `fetch_drs_document` | `fetch_personal_document` |
+| Truncation | 15K chars (DRS) / unlimited (CFR) | 50K chars initial |
+| Fallback search | N/A (re-search index) | `search_personal_document` |
+| Size limit | No limit | 100K chars |
+| Grounding | Trust indexed content | Strict: only cite document |
+
+### Why This Matters for Aerospace Compliance
+
+1. **Traceability** - Auditors require every compliance claim to trace to a document
+2. **No speculation** - A hallucinated requirement could cause safety issues
+3. **Explicit gaps** - "Not found" is better than invented information
+4. **Regulatory context** - Connecting uploaded docs to CFR sections helps engineers
+
 ---
 
 ## Search Proxy API
@@ -282,11 +415,11 @@ Upload a PDF document.
 1. Validate file (PDF, size limit)
 2. Compute file hash (SHA-256) for deduplication
 3. Check if user already uploaded document with same hash → reject if duplicate
-4. Extract text using pypdf
-5. If text extraction yields little/no content, run OCR using pdf2image + pytesseract
+4. Extract text using PyMuPDF (`fitz`)
+5. If text extraction yields little/no content, use PyMuPDF's OCR fallback
 6. Chunk text (~1000 tokens per chunk)
 7. Generate embeddings for each chunk
-8. Forward to search service `/index` endpoint (include file_hash)
+8. Forward to search proxy `/index` endpoint (include file_hash)
 9. Return upload status
 
 **Deduplication:**
@@ -296,9 +429,8 @@ Upload a PDF document.
 - Hash stored in index for future duplicate checks
 
 **OCR Fallback Logic:**
-- If pypdf extracts < 100 characters per page average, assume scanned document
-- Convert PDF pages to images using pdf2image (poppler)
-- Run pytesseract OCR on each page image
+- If PyMuPDF text extraction yields < 100 characters per page average, assume scanned document
+- Use PyMuPDF's built-in OCR capability (`page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)` with OCR fallback)
 - Combine extracted text and proceed with chunking
 
 **Response:**
@@ -382,14 +514,11 @@ Show: "3 of 20 documents used" with progress bar
 ## Dependencies
 
 ### Python Packages
-- `pypdf` - Text extraction from native PDFs
-- `pdf2image` - Convert PDF pages to images for OCR
-- `pytesseract` - Python wrapper for Tesseract OCR
-- `Pillow` - Image processing
+- `PyMuPDF` (fitz) - PDF text extraction with built-in OCR support
+- `httpx` - Async HTTP client for search proxy communication
 
-### System Dependencies (App Service)
-- `poppler-utils` - Required by pdf2image for PDF rendering
-- `tesseract-ocr` - OCR engine (install via apt on Linux App Service)
+### System Dependencies
+- None required - PyMuPDF handles PDF rendering and OCR internally
 
 ---
 
@@ -463,6 +592,71 @@ Show: "3 of 20 documents used" with progress bar
 - [ ] DNS cutover from old resources
 - [ ] Monitor for issues
 - [ ] Decommission old `faa-agent-*` resources
+
+---
+
+## Implementation Details
+
+### Backend Configuration
+
+Add to `backend/app/config.py`:
+
+```python
+# Search Proxy
+search_proxy_url: str = "http://localhost:8001"  # Default for local dev
+```
+
+Environment variable: `SEARCH_PROXY_URL`
+
+### Local Development
+
+Use `scripts/dev_start.sh` to start both services:
+
+```bash
+#!/bin/bash
+# Start search proxy on port 8001
+cd backend/search_proxy && uvicorn main:app --port 8001 &
+SEARCH_PROXY_PID=$!
+
+# Start backend on port 8000
+cd backend && uvicorn app.main:app --port 8000 &
+BACKEND_PID=$!
+
+echo "Search proxy running on http://localhost:8001 (PID: $SEARCH_PROXY_PID)"
+echo "Backend running on http://localhost:8000 (PID: $BACKEND_PID)"
+echo "Press Ctrl+C to stop both services"
+
+trap "kill $SEARCH_PROXY_PID $BACKEND_PID 2>/dev/null" EXIT
+wait
+```
+
+### Explicit Index Parameter
+
+All search proxy endpoints require an explicit `index` parameter:
+
+| Endpoint | Index Parameter |
+|----------|----------------|
+| `POST /search` | `index` in JSON body |
+| `POST /index` | `index` in JSON body |
+| `GET /documents` | `index` query param |
+| `DELETE /documents/{id}` | `index` query param |
+
+Valid index values: `faa-agent`, `nrc-agent`, `dod-agent`
+
+### Index Schema Migration Script
+
+Run `scripts/update_index_schema.py` to add new fields to existing indexes:
+
+```bash
+# Preview changes (no modifications)
+python scripts/update_index_schema.py --dry-run
+
+# Apply changes to a specific index
+python scripts/update_index_schema.py --index faa-agent
+
+# Apply changes to all indexes
+python scripts/update_index_schema.py --all
+```
 
 ---
 

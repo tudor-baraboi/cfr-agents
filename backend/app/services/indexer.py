@@ -5,10 +5,12 @@ Handles background indexing of documents to the vector search index.
 Used for progressive indexing of cached documents.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
-from typing import Any
+from typing import Any, List, Optional
 
 import httpx
 
@@ -24,7 +26,7 @@ EMBEDDING_DIMENSIONS = 1024
 async def generate_embedding(
     text: str,
     input_type: str = "document",
-) -> list[float] | None:
+) -> Optional[List[float]]:
     """
     Generate embedding using Azure AI Services Cohere model.
     

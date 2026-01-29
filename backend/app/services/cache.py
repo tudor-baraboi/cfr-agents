@@ -5,11 +5,13 @@ Provides async cache operations for CFR and DRS documents.
 Caching reduces API calls and enables progressive indexing.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceNotFoundError

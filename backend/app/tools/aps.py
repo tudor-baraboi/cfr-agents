@@ -8,9 +8,11 @@ API Documentation: docs/aps-api-documentation.md
 Developer Portal: https://adams-api-developer.nrc.gov/
 """
 
+from __future__ import annotations
+
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 

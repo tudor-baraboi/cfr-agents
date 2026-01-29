@@ -5,10 +5,12 @@ This is the core of the agent: receives user messages, calls Claude,
 executes tools, and streams responses back.
 """
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
-from typing import AsyncIterator, Any
+from typing import AsyncIterator, Any, Optional
 
 import anthropic
 
@@ -27,12 +29,16 @@ async def execute_tool_with_config(
     name: str,
     input_data: dict[str, Any],
     agent_config: AgentConfig,
+    fingerprint: Optional[str] = None,
+    personal_doc_cache: Optional[dict[str, str]] = None,
 ) -> str:
     """
     Execute a tool by name using the agent's tool implementations.
     
-    Automatically injects the agent's search_index into tools that accept
-    an 'index_name' parameter, enabling context-aware index routing.
+    Automatically injects:
+    - agent's search_index into tools that accept 'index_name' parameter
+    - user's fingerprint into tools that accept 'fingerprint' parameter
+    - personal_doc_cache into tools that accept it (for document grounding)
     """
     if name not in agent_config.tool_implementations:
         logger.warning(f"Unknown tool for agent {agent_config.name}: {name}")
@@ -40,15 +46,29 @@ async def execute_tool_with_config(
     
     try:
         tool_func = agent_config.tool_implementations[name]
+        sig = inspect.signature(tool_func)
         
         # Auto-inject agent's search index if tool accepts index_name parameter
-        sig = inspect.signature(tool_func)
         if "index_name" in sig.parameters and "index_name" not in input_data:
             input_data["index_name"] = agent_config.search_index
             logger.debug(f"Injected index_name={agent_config.search_index} into {name}")
         
+        # Auto-inject user's fingerprint if tool accepts fingerprint parameter
+        if "fingerprint" in sig.parameters and "fingerprint" not in input_data and fingerprint:
+            input_data["fingerprint"] = fingerprint
+            logger.debug(f"Injected fingerprint into {name}")
+        
+        # Auto-inject personal document cache if tool accepts it
+        if "personal_doc_cache" in sig.parameters and personal_doc_cache is not None:
+            input_data["personal_doc_cache"] = personal_doc_cache
+            logger.debug(f"Injected personal_doc_cache into {name}")
+        
         result = await tool_func(**input_data)
-        return str(result)
+        # Ensure non-empty result (Claude API requires non-empty text content blocks)
+        result_str = str(result) if result else ""
+        if not result_str.strip():
+            result_str = f"Tool {name} completed but returned no content."
+        return result_str
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
         return f"Error executing {name}: {e}"
@@ -58,6 +78,7 @@ async def handle_conversation(
     conversation_id: str,
     user_message: str,
     agent_config: AgentConfig,
+    fingerprint: Optional[str] = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     Main orchestration loop:
@@ -71,6 +92,7 @@ async def handle_conversation(
         conversation_id: Unique conversation identifier
         user_message: The user's message
         agent_config: Configuration for the agent (system prompt, tools, etc.)
+        fingerprint: User's browser fingerprint (for personal document isolation)
     """
     settings = get_settings()
     
@@ -80,9 +102,39 @@ async def handle_conversation(
     
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     
+    # Conversation-scoped cache for personal document content (for grounding)
+    personal_doc_cache: dict[str, str] = {}
+    
     # Load conversation history and add user message
     messages = get_history(conversation_id).copy()
     messages.append({"role": "user", "content": user_message})
+    
+    # Estimate token count and warn if approaching limit
+    # Rough approximation: ~4 chars per token (conservative estimate)
+    def estimate_tokens(msgs: list, system: str) -> int:
+        total_chars = len(system)
+        for msg in msgs:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        # Tool results can be nested
+                        total_chars += len(str(block))
+        return total_chars // 4
+    
+    estimated_tokens = estimate_tokens(messages, agent_config.system_prompt)
+    TOKEN_WARNING_THRESHOLD = 150000
+    TOKEN_LIMIT = 200000
+    
+    if estimated_tokens > TOKEN_WARNING_THRESHOLD:
+        warning_pct = int((estimated_tokens / TOKEN_LIMIT) * 100)
+        yield {
+            "type": "warning",
+            "content": f"⚠️ This conversation is using ~{warning_pct}% of the context limit ({estimated_tokens:,} / {TOKEN_LIMIT:,} tokens). Consider starting a new conversation to avoid errors."
+        }
+        logger.warning(f"Conversation {conversation_id} approaching token limit: ~{estimated_tokens:,} tokens")
     
     # Get tools from agent config
     tool_definitions = agent_config.tool_definitions if agent_config.tool_definitions else None
@@ -103,37 +155,97 @@ async def handle_conversation(
                 text_chunks = []
                 chunk_count = 0
                 
+                # Use Extended Thinking with interleaved thinking for reasoning between tool calls
+                # The beta header enables thinking blocks to appear after tool results, not just at start
                 async with client.messages.stream(
                     model=settings.anthropic_model,
                     max_tokens=16384,
                     system=agent_config.system_prompt,
                     messages=messages,
                     tools=tool_definitions if tool_definitions else anthropic.NOT_GIVEN,
+                    thinking={
+                        "type": "enabled",
+                        "budget_tokens": 10000,  # Budget spans all thinking blocks with interleaved
+                    },
+                    extra_headers={
+                        "anthropic-beta": "interleaved-thinking-2025-05-14"
+                    },
                 ) as stream:
+                    thinking_chunks = []
+                    
+                    # Meta-commentary filter with streaming:
+                    # Stream text normally for good UX, but track if we're in a text block.
+                    # If tool_use starts right after text, send a "clear_text" event to
+                    # tell the frontend to remove the meta-commentary we already streamed.
+                    current_text_block_chars = 0  # Track chars in current text block
+                    in_text_block = False
+                    
                     async for event in stream:
                         if event.type == "content_block_start":
-                            if hasattr(event.content_block, "text"):
-                                logger.debug(f"[iter={iteration}] Text block starting")
-                            elif hasattr(event.content_block, "name"):
-                                # Tool use starting
-                                logger.info(f"[iter={iteration}] Tool use starting: {event.content_block.name}")
-                                yield {
-                                    "type": "tool_start",
-                                    "tool": event.content_block.name,
-                                }
+                            if hasattr(event.content_block, "type"):
+                                block_type = event.content_block.type
+                                if block_type == "thinking":
+                                    logger.debug(f"[iter={iteration}] Thinking block starting")
+                                    current_text_block_chars = 0
+                                    in_text_block = False
+                                elif block_type == "text":
+                                    logger.debug(f"[iter={iteration}] Text block starting")
+                                    current_text_block_chars = 0
+                                    in_text_block = True
+                                elif block_type == "tool_use":
+                                    logger.info(f"[iter={iteration}] Tool use starting: {event.content_block.name}")
+                                    # Tool use right after text = meta-commentary
+                                    # Tell frontend to clear the text we just streamed
+                                    if current_text_block_chars > 0:
+                                        logger.info(f"[iter={iteration}] Sending clear_text for {current_text_block_chars} chars of meta-commentary")
+                                        yield {"type": "clear_text", "chars": current_text_block_chars}
+                                    current_text_block_chars = 0
+                                    in_text_block = False
+                                    yield {
+                                        "type": "tool_start",
+                                        "tool": event.content_block.name,
+                                    }
                         
                         elif event.type == "content_block_delta":
-                            if hasattr(event.delta, "text"):
-                                chunk_count += 1
-                                text_chunks.append(event.delta.text)
-                                yield {"type": "text", "content": event.delta.text}
-                            elif hasattr(event.delta, "partial_json"):
-                                yield {"type": "tool_input", "partial": event.delta.partial_json}
+                            if hasattr(event.delta, "type"):
+                                delta_type = event.delta.type
+                                if delta_type == "thinking_delta":
+                                    # Extended Thinking: reasoning content
+                                    thinking_text = event.delta.thinking
+                                    thinking_chunks.append(thinking_text)
+                                    yield {"type": "thinking", "content": thinking_text}
+                                elif delta_type == "signature_delta":
+                                    # Signature for thinking block verification (required for preservation)
+                                    logger.debug(f"[iter={iteration}] Received thinking block signature")
+                                elif delta_type == "text_delta":
+                                    # Stream text immediately for good UX
+                                    chunk_count += 1
+                                    text = event.delta.text
+                                    text_chunks.append(text)
+                                    if in_text_block:
+                                        current_text_block_chars += len(text)
+                                    yield {"type": "text", "content": text}
+                                elif delta_type == "input_json_delta":
+                                    yield {"type": "tool_input", "partial": event.delta.partial_json}
+                        
+                        elif event.type == "content_block_stop":
+                            # Text block ended - reset counter but keep the value
+                            # (we need it if tool_use starts next)
+                            if not in_text_block:
+                                current_text_block_chars = 0
+                            in_text_block = False
                         
                         elif event.type == "message_stop":
+                            # Reset for next iteration
+                            current_text_block_chars = 0
                             logger.info(f"[iter={iteration}] Message stopped")
                         
                     response = await stream.get_final_message()
+                    
+                    # Log thinking summary
+                    total_thinking = "".join(thinking_chunks)
+                    if total_thinking:
+                        logger.info(f"[iter={iteration}] Thinking: {len(total_thinking)} chars")
                 
                 # Log response details
                 total_text = "".join(text_chunks)
@@ -201,7 +313,9 @@ async def handle_conversation(
             logger.info(f"Executing tool: {tool_use.name}")
             yield {"type": "tool_executing", "tool": tool_use.name, "input": tool_use.input}
             
-            result = await execute_tool_with_config(tool_use.name, tool_use.input, agent_config)
+            result = await execute_tool_with_config(
+                tool_use.name, tool_use.input, agent_config, fingerprint, personal_doc_cache
+            )
             
             tool_results.append({
                 "type": "tool_result",

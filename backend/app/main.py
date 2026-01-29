@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 
 from app.config import get_settings
-from app.routers import health, auth, feedback, admin
+from app.routers import health, auth, feedback, admin, documents
 from app.routers.auth import decode_jwt_token
 from app.services.orchestrator import handle_conversation
 from app.services.usage import get_usage_tracker
@@ -58,6 +58,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(feedback.router)
 app.include_router(admin.router)
+app.include_router(documents.router)
 
 
 @app.websocket("/ws/chat/{conversation_id}")
@@ -173,7 +174,7 @@ async def websocket_chat(
             # Stream response from Claude orchestrator
             turn_completed = False
             try:
-                async for chunk in handle_conversation(conversation_id, user_message, agent_config):
+                async for chunk in handle_conversation(conversation_id, user_message, agent_config, fingerprint):
                     # Check if connection is still open before sending
                     if websocket.client_state != WebSocketState.CONNECTED:
                         logger.warning(f"WebSocket disconnected during response: {conversation_id}")

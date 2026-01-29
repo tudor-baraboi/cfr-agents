@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     azure_search_index_nrc: str = "nrc-agent"
     azure_search_index_dod: str = "dod-agent"
     
+    # Search Proxy (for personal document isolation)
+    search_proxy_url: str = "http://localhost:8001"  # Default for local dev
+    
     # External APIs - FAA
     ecfr_api_base_url: str = "https://www.ecfr.gov/api/versioner/v1"
     drs_api_base_url: str = "https://drs.faa.gov/api/drs"

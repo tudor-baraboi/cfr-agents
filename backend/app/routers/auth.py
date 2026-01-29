@@ -3,9 +3,11 @@ Authentication router for fingerprint-based daily quotas and admin access codes.
 Handles fingerprint validation, JWT issuance, and admin authentication.
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
@@ -25,13 +27,14 @@ JWT_EXPIRY_DAYS = 1  # Fingerprint tokens expire daily (quota resets)
 
 class ValidateCodeRequest(BaseModel):
     code: str
+    fingerprint: Optional[str] = None  # Optional fingerprint for My Documents feature
 
 
 class ValidateCodeResponse(BaseModel):
     token: str
     is_admin: bool
     requests_used: int
-    requests_remaining: int | None  # None for admin (unlimited)
+    requests_remaining: Optional[int]  # None for admin (unlimited)
 
 
 class FingerprintRequest(BaseModel):
@@ -66,7 +69,7 @@ def create_jwt_token_for_fingerprint(fingerprint: str) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM)
 
 
-def create_jwt_token_for_admin(code: str) -> str:
+def create_jwt_token_for_admin(code: str, fingerprint: Optional[str] = None) -> str:
     """Create a JWT token for an admin user."""
     settings = get_settings()
     payload = {
@@ -75,10 +78,13 @@ def create_jwt_token_for_admin(code: str) -> str:
         "exp": datetime.utcnow() + timedelta(days=30),  # Admin tokens last longer
         "iat": datetime.utcnow(),
     }
+    # Include fingerprint if provided (enables My Documents feature for admin)
+    if fingerprint:
+        payload["fingerprint"] = fingerprint
     return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM)
 
 
-def decode_jwt_token(token: str) -> dict | None:
+def decode_jwt_token(token: str) -> Optional[dict]:
     """Decode and validate a JWT token. Returns None if invalid."""
     settings = get_settings()
     try:
@@ -143,8 +149,8 @@ async def validate_code(request: ValidateCodeRequest):
     
     # Check if it's an admin code
     if code in admin_codes:
-        logger.info(f"Admin code validated: {code[:8]}...")
-        token = create_jwt_token_for_admin(code)
+        logger.info(f"Admin code validated: {code[:8]}... (fingerprint={request.fingerprint[:8] if request.fingerprint else 'none'})")
+        token = create_jwt_token_for_admin(code, request.fingerprint)
         return ValidateCodeResponse(
             token=token,
             is_admin=True,
@@ -157,7 +163,7 @@ async def validate_code(request: ValidateCodeRequest):
     raise HTTPException(status_code=401, detail="Invalid access code")
 
 
-async def verify_admin_token(authorization: Annotated[str | None, Header()] = None) -> str:
+async def verify_admin_token(authorization: Annotated[Optional[str], Header()] = None) -> str:
     """Dependency to verify admin authorization for protected endpoints."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")

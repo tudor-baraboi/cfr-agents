@@ -1,8 +1,11 @@
 """
 Feedback router for collecting user feedback and logs.
 """
+
+from __future__ import annotations
+
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
@@ -17,10 +20,10 @@ router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 class ContactInfo(BaseModel):
     """Optional contact information."""
-    name: str | None = None
-    email: str | None = None
-    phone: str | None = None
-    company: str | None = None
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -29,7 +32,7 @@ class FeedbackRequest(BaseModel):
     message: str
     logs: list[dict[str, Any]] = []
     userAgent: str = ""
-    contact: ContactInfo | None = None
+    contact: Optional[ContactInfo] = None
 
 
 class FeedbackResponse(BaseModel):
@@ -38,7 +41,7 @@ class FeedbackResponse(BaseModel):
     message: str
 
 
-async def get_current_user(authorization: str | None) -> dict:
+async def get_current_user(authorization: Optional[str]) -> dict:
     """Extract user info from JWT token."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
@@ -62,7 +65,7 @@ async def get_current_user(authorization: str | None) -> dict:
 @router.post("/submit", response_model=FeedbackResponse)
 async def submit_feedback(
     request: FeedbackRequest,
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[Optional[str], Header()] = None,
 ) -> FeedbackResponse:
     """
     Submit user feedback with attached logs.

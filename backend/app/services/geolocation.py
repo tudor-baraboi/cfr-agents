@@ -4,6 +4,8 @@ IP geolocation service using ip-api.com (free, no API key required).
 Rate limit: 45 requests/minute on free tier.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Optional
 
