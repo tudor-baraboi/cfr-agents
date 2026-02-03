@@ -18,7 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.config import get_settings
-from app.services.indexer import generate_embedding
+from app.services.indexer import generate_embedding, generate_embeddings_batch
 
 # OCR imports (optional - graceful fallback if not available)
 try:
@@ -38,6 +38,7 @@ MAX_DOCUMENTS_PER_USER = 20
 MAX_CHUNKS_PER_DOCUMENT = 100
 CHUNK_SIZE_CHARS = 4000  # ~1000 tokens
 MIN_CHARS_PER_PAGE = 100  # Below this, use OCR
+MAX_OCR_PAGES = 200  # Max pages to OCR (with 2 vCPU this should work)
 
 
 class DocumentUploadResponse(BaseModel):
@@ -111,6 +112,11 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> tuple[str, int]:
         logger.warning("OCR not available (pytesseract/pdf2image not installed). Returning sparse text.")
         return "\n\n".join(all_text), page_count
     
+    # Limit OCR to avoid timeout on very large scanned documents
+    if page_count > MAX_OCR_PAGES:
+        logger.warning(f"Scanned PDF too large for OCR ({page_count} pages > {MAX_OCR_PAGES} max). Returning sparse text.")
+        raise ValueError(f"Scanned PDFs over {MAX_OCR_PAGES} pages are not supported. This document has {page_count} pages. Please upload a text-based PDF or a smaller scanned document.")
+    
     try:
         return _extract_text_with_ocr(pdf_bytes, page_count)
     except Exception as e:
@@ -129,24 +135,18 @@ def _extract_text_with_ocr(pdf_bytes: bytes, page_count: int) -> tuple[str, int]
     Returns:
         (full_text, page_count)
     """
-    # Convert PDF pages to images
-    # Using 200 DPI for good balance between quality and speed
+    # Convert PDF pages to images at lower DPI for speed
     logger.info(f"Converting {page_count} PDF pages to images for OCR...")
-    images = convert_from_bytes(pdf_bytes, dpi=200, fmt='png')
+    images = convert_from_bytes(pdf_bytes, dpi=100, fmt='png')  # Lower DPI = faster
     
     all_text = []
-    total_chars = 0
-    
     for i, image in enumerate(images):
-        # Run OCR on each page image
         page_text = pytesseract.image_to_string(image, lang='eng')
         all_text.append(page_text)
-        total_chars += len(page_text.strip())
-        
-        # Log progress for large documents
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 5 == 0:
             logger.info(f"OCR progress: {i + 1}/{page_count} pages")
     
+    total_chars = sum(len(t.strip()) for t in all_text)
     avg_chars = total_chars / max(page_count, 1)
     logger.info(f"OCR complete: extracted {total_chars} chars from {page_count} pages ({avg_chars:.0f} chars/page)")
     
@@ -260,17 +260,21 @@ async def index_document_chunks(
     """
     Index document chunks via the search proxy.
     
+    Uses batch embedding for much faster processing.
+    
     Returns number of successfully indexed chunks.
     """
     settings = get_settings()
     uploaded_at = datetime.now(timezone.utc).isoformat()
     
+    # Generate all embeddings in batches (much faster than sequential)
+    logger.info(f"Generating embeddings for {len(chunks)} chunks...")
+    embeddings = await generate_embeddings_batch(chunks, input_type="document")
+    logger.info(f"Embeddings complete. Building documents...")
+    
     documents = []
-    for i, chunk_text in enumerate(chunks):
+    for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
         chunk_id = f"{doc_id}-chunk{i}"
-        
-        # Generate embedding
-        embedding = await generate_embedding(chunk_text, input_type="document")
         
         doc = {
             "id": chunk_id,

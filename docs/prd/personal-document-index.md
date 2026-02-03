@@ -35,12 +35,12 @@ Enable users to upload their own PDF documents (internal procedures, company man
 
 ### Current State
 ```
-Frontend → e-cfr-agent-backend (has Azure AI Search credentials) → Azure AI Search
+Frontend → ecfr-agent-backend (has Azure AI Search credentials) → Azure AI Search
 ```
 
 ### Target State
 ```
-Frontend → e-cfr-agent-backend (NO Azure credentials) → e-cfr-search-proxy (enforces fingerprint) → Azure AI Search
+Frontend → ecfr-agent-backend (NO Azure credentials) → ecfr-search-proxy (enforces fingerprint) → Azure AI Search
 ```
 
 ### Key Principle
@@ -50,36 +50,36 @@ The search proxy is the **only** component with Azure AI Search credentials. It 
 
 ## New Azure Resources
 
-All resources will be created in a new resource group: `e-cfr-rg`
+All resources will be created in a new resource group: `ecfr-rg`
 
 ### Compute & Application
 
 | Resource | Type | Purpose |
 |----------|------|---------|
-| `e-cfr-agent-backend` | App Service | Main backend (migrated from `faa-agent-backend`) |
-| `e-cfr-search-proxy` | App Service | Search proxy with fingerprint enforcement |
-| `e-cfr-app-service-plan` | App Service Plan | Hosting plan for App Services (B1 or higher) |
+| `ecfr-agent-backend` | App Service | Main backend (migrated from `faa-agent-backend`) |
+| `ecfr-search-proxy` | App Service | Search proxy with fingerprint enforcement |
+| `ecfr-app-service-plan` | App Service Plan | Hosting plan for App Services (B1 or higher) |
 
 ### Data & Search
 
 | Resource | Type | Purpose |
 |----------|------|---------|
-| `e-cfr-ai-search-service` | Azure AI Search | Managed search service (Basic tier, migrated from `faa-agent-ai-search`) |
+| `ecfr-ai-search-service` | Azure AI Search | Managed search service (Basic tier, migrated from `faa-agent-ai-search`) |
 | `ecfrstorage` | Storage Account | Blob storage for document cache and logs |
-| `e-cfr-postgres` | Azure Database for PostgreSQL | User data, usage tracking, feedback (Flexible Server) |
+| `ecfr-postgres` | Azure Database for PostgreSQL | User data, usage tracking, feedback (Flexible Server) |
 
 ### AI Services
 
 | Resource | Type | Purpose |
 |----------|------|---------|
-| `e-cfr-ai-services` | Azure AI Services | Cohere embeddings endpoint |
+| `ecfr-ai-services` | Azure AI Services | Cohere embeddings endpoint |
 
 ### Monitoring & Operations
 
 | Resource | Type | Purpose |
 |----------|------|---------|
-| `e-cfr-app-insights` | Application Insights | APM, logging, performance monitoring |
-| `e-cfr-log-analytics` | Log Analytics Workspace | Centralized log storage (required by App Insights) |
+| `ecfr-app-insights` | Application Insights | APM, logging, performance monitoring |
+| `ecfr-log-analytics` | Log Analytics Workspace | Centralized log storage (required by App Insights) |
 
 ### Storage Account Containers
 
@@ -112,7 +112,7 @@ Add to existing indexes (`faa-index`, `nrc-index`, `dod-index`):
 
 **Current:** Directly calls Azure AI Search SDK with query and filters.
 
-**Change:** Call `e-cfr-search-proxy` instead. The proxy handles:
+**Change:** Call `ecfr-search-proxy` instead. The proxy handles:
 - Adding fingerprint to request
 - Enforcing fingerprint filter
 - Returning results
@@ -544,28 +544,45 @@ Show: "3 of 20 documents used" with progress bar
 
 ### Phase 1: Infrastructure (Week 1)
 
+**Prerequisites:**
+- [ ] Log into personal Azure account using browser auth to select the correct credentials:
+  ```bash
+  az login
+  ```
+  This opens a browser where you can select the hotmail account (NOT Microsoft corp account).
+- [ ] After login, verify the correct subscription is active:
+  ```bash
+  az account show --query "{name:name, id:id}" -o table
+  ```
+  Should show "Tudor's Personal Subscription" (not `infinity` or corp subscriptions)
+- [ ] If wrong subscription, set it explicitly:
+  ```bash
+  az account set --subscription "Tudor's Personal Subscription"
+  ```
+- [ ] Location: `westus`
+
 **Resource Group & Monitoring:**
-- [ ] Create `e-cfr-rg` resource group
-- [ ] Create `e-cfr-log-analytics` Log Analytics Workspace
-- [ ] Create `e-cfr-app-insights` Application Insights (linked to Log Analytics)
+- [ ] Create `ecfr-rg` resource group
+- [ ] Create `ecfr-log-analytics` Log Analytics Workspace
+- [ ] Create `ecfr-app-insights` Application Insights (linked to Log Analytics)
 
 **Data & Search:**
-- [ ] Create `e-cfr-ai-search-service` (Azure AI Search, Basic tier)
+- [ ] Create `ecfr-ai-search-service` (Azure AI Search, Basic tier)
 - [ ] Create indexes with new schema (owner_fingerprint, uploaded_at, page_count, file_hash)
 - [ ] Create `ecfrstorage` storage account with containers (documents, logs, uploads)
-- [ ] Create `e-cfr-postgres` PostgreSQL Flexible Server
+- [ ] Create `ecfr-postgres` PostgreSQL Flexible Server
 - [ ] Copy existing blob cache content from old storage account
 - [ ] Migrate existing indexed documents (with owner_fingerprint = null)
 - [ ] Migrate PostgreSQL data (usage, feedback tables)
 
 **AI Services:**
-- [ ] Create `e-cfr-ai-services` (or reuse existing - Cohere embeddings are shared)
+- [ ] Create `ecfr-ai-services` (or reuse existing - Cohere embeddings are shared)
 
 **Compute:**
-- [ ] Create `e-cfr-app-service-plan` (Linux, B1 or higher)
+- [ ] Create `ecfr-app-service-plan` (Linux, B1 or higher)
 
 ### Phase 2: Search Proxy (Week 2)
-- [ ] Create `e-cfr-search-proxy` App Service
+- [ ] Create `ecfr-search-proxy` App Service
 - [ ] Implement POST `/search` with fingerprint enforcement
 - [ ] Implement POST `/index` with validation
 - [ ] Implement GET `/documents`
@@ -578,7 +595,7 @@ Show: "3 of 20 documents used" with progress bar
 - [ ] Add POST `/documents` endpoint with PDF processing
 - [ ] Add GET `/documents` endpoint (proxy)
 - [ ] Add DELETE `/documents/{id}` endpoint (proxy)
-- [ ] Deploy `e-cfr-agent-backend`
+- [ ] Deploy `ecfr-agent-backend`
 
 ### Phase 4: Frontend (Week 4)
 - [ ] Add My Documents panel component
@@ -657,6 +674,164 @@ python scripts/update_index_schema.py --index faa-agent
 # Apply changes to all indexes
 python scripts/update_index_schema.py --all
 ```
+
+---
+
+## Deployment Verification Checklist
+
+After deploying to Azure, run through this checklist to verify everything is configured correctly.
+
+### 1. Health Check
+
+```bash
+# Verify both services are running
+curl -s https://<backend-url>/health
+curl -s https://<search-proxy-url>/health
+```
+
+Both should return `{"status":"healthy"}`.
+
+### 2. Admin Token Configuration
+
+Add admin codes for unlimited access and dashboard:
+
+```bash
+az containerapp update \
+  --name ecfr-backend \
+  --resource-group ecfr-rg \
+  --set-env-vars "ADMIN_CODES=ADMIN-TUDOR"
+```
+
+Test by validating the admin code:
+```bash
+curl -s -X POST "https://<backend-url>/auth/validate-code" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "ADMIN-TUDOR", "fingerprint": "test123456789"}' | jq
+```
+
+Should return `is_admin: true`.
+
+### 3. Check for Double Slash in Endpoints
+
+Azure AI Services endpoints with trailing slashes cause URL issues (e.g., `https://westus.api.cognitive.microsoft.com//models/...`).
+
+**In code:** Ensure endpoints strip trailing slashes:
+```python
+endpoint = settings.azure_ai_services_endpoint.rstrip('/')
+url = f"{endpoint}/models/embeddings?api-version=..."
+```
+
+**Check logs for errors:**
+```bash
+az containerapp logs show --name ecfr-backend --resource-group ecfr-rg --tail 50 | grep "400 Bad Request"
+```
+
+If you see double-slash URLs in the logs, the code fix wasn't deployed.
+
+### 4. Environment Variable Names
+
+Pydantic config expects specific variable names. Azure Portal/CLI may use different conventions.
+
+**Backend (`ecfr-backend`):**
+
+| Config Field | Required Env Var |
+|--------------|------------------|
+| `azure_blob_connection_string` | `AZURE_BLOB_CONNECTION_STRING` |
+| `azure_search_endpoint` | `AZURE_SEARCH_ENDPOINT` |
+| `azure_search_key` | `AZURE_SEARCH_KEY` or `AZURE_SEARCH_API_KEY` |
+| `azure_ai_services_endpoint` | `AZURE_AI_SERVICES_ENDPOINT` |
+| `azure_ai_services_key` | `AZURE_AI_SERVICES_KEY` |
+| `jwt_secret` | `JWT_SECRET` |
+| `admin_codes` | `ADMIN_CODES` |
+| `search_proxy_url` | `SEARCH_PROXY_URL` |
+
+**Search Proxy (`ecfr-search-proxy`):**
+
+| Config Field | Required Env Var |
+|--------------|------------------|
+| `azure_search_endpoint` | `AZURE_SEARCH_ENDPOINT` |
+| `azure_search_key` | `AZURE_SEARCH_KEY` ⚠️ NOT `AZURE_SEARCH_API_KEY` |
+| `azure_ai_services_endpoint` | `AZURE_AI_SERVICES_ENDPOINT` |
+| `azure_ai_services_key` | `AZURE_AI_SERVICES_KEY` |
+
+**Common mistakes:**
+- ❌ `AZURE_STORAGE_CONNECTION_STRING` → ✅ `AZURE_BLOB_CONNECTION_STRING`
+- ❌ `AZURE_SEARCH_API_KEY` (search proxy) → ✅ `AZURE_SEARCH_KEY`
+
+**Verify env vars:**
+```bash
+# List all env vars on backend
+az containerapp show --name ecfr-backend --resource-group ecfr-rg \
+  --query "properties.template.containers[0].env[].name" -o tsv
+
+# List all env vars on search proxy
+az containerapp show --name ecfr-search-proxy --resource-group ecfr-rg \
+  --query "properties.template.containers[0].env[].name" -o tsv
+```
+
+### 5. OCR Tools (poppler, tesseract)
+
+Image-based PDFs require system packages for OCR. The Dockerfile must include:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**Test by checking logs when uploading an image-based PDF:**
+```bash
+az containerapp logs show --name ecfr-backend --resource-group ecfr-rg --tail 50 | grep -i "ocr\|poppler"
+```
+
+**Error if not installed:**
+```
+ERROR: Unable to get page count. Is poppler installed and in PATH?
+```
+
+**Fix:** Update Dockerfile, rebuild, and redeploy:
+```bash
+cd backend
+az acr build --registry <acr-name> --resource-group ecfr-rg --image ecfr-backend:latest --file Dockerfile .
+az containerapp revision restart --name ecfr-backend --resource-group ecfr-rg --revision <revision-name>
+```
+
+### 6. Test Document Upload Flow
+
+```bash
+# 1. Get auth token
+TOKEN=$(curl -s -X POST "https://<backend-url>/auth/fingerprint" \
+  -H "Content-Type: application/json" \
+  -d '{"visitor_id": "testfingerprint123", "agent": "faa"}' | jq -r '.token')
+
+# 2. Upload a small text-based PDF
+curl -X POST "https://<backend-url>/documents" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@test.pdf" \
+  -F "fingerprint=testfingerprint123" \
+  -F "index=faa-agent"
+
+# 3. List documents
+curl -s "https://<backend-url>/documents?fingerprint=testfingerprint123&index=faa-agent" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+### 7. Check Search Proxy Connectivity
+
+If document operations return 503, the search proxy can't reach Azure Search:
+
+```bash
+# Check search proxy logs
+az containerapp logs show --name ecfr-search-proxy --resource-group ecfr-rg --tail 30
+```
+
+**Error pattern:**
+```
+"POST /index HTTP/1.1" 503 Service Unavailable
+```
+
+**Likely cause:** Wrong env var name (see #4 above).
 
 ---
 

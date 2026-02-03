@@ -251,7 +251,7 @@ export function createChatStore(
   let totalChars = 0;
   
   ws.onEvent((event: WebSocketEvent) => {
-    logger.debug('store', `Event received: ${event.type}`, event.type === 'text' || event.type === 'thinking' ? { chars: event.content.length } : undefined);
+    logger.info('store', `Event received: ${event.type}`, event.type === 'text' || event.type === 'thinking' ? { chars: event.content.length } : undefined);
     
     switch (event.type) {
       case 'thinking':

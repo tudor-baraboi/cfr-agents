@@ -209,10 +209,13 @@ async def handle_conversation(
                         elif event.type == "content_block_delta":
                             if hasattr(event.delta, "type"):
                                 delta_type = event.delta.type
+                                logger.debug(f"[iter={iteration}] Delta type: {delta_type}")
                                 if delta_type == "thinking_delta":
                                     # Extended Thinking: reasoning content
                                     thinking_text = event.delta.thinking
                                     thinking_chunks.append(thinking_text)
+                                    print(f"!!!THINKING!!! iter={iteration} len={len(thinking_text)}", flush=True)
+                                    logger.info(f"[iter={iteration}] Yielding thinking chunk: {len(thinking_text)} chars")
                                     yield {"type": "thinking", "content": thinking_text}
                                 elif delta_type == "signature_delta":
                                     # Signature for thinking block verification (required for preservation)

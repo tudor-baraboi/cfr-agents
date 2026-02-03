@@ -231,8 +231,10 @@ const MyDocumentsPanel: Component<MyDocumentsPanelProps> = (props) => {
                     <Show when={uploadState() === 'uploading'}>
                       <span class="upload-spinner-ring"></span>
                       <span>
-                        Uploading {uploadingFile()}
-                        <Show when={uploadProgress()}>
+                        <Show 
+                          when={uploadProgress() && uploadProgress()!.loaded < uploadProgress()!.total}
+                          fallback={<>Processing {uploadingFile()} (OCR + indexing)... This may take several minutes for scanned PDFs.</>}
+                        >
                           {(() => {
                             const prog = uploadProgress()!;
                             const formatBytes = (bytes: number) => {
@@ -240,7 +242,7 @@ const MyDocumentsPanel: Component<MyDocumentsPanelProps> = (props) => {
                               if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
                               return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
                             };
-                            return ` (${formatBytes(prog.loaded)} / ${formatBytes(prog.total)})`;
+                            return `Uploading ${uploadingFile()} (${formatBytes(prog.loaded)} / ${formatBytes(prog.total)})`;
                           })()}
                         </Show>
                       </span>

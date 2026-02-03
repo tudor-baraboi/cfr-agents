@@ -1,0 +1,47 @@
+{
+  "name": "faa-agent",
+  "fields": [
+    {"name": "id", "type": "Edm.String", "key": true, "searchable": false, "filterable": false, "sortable": false},
+    {"name": "content", "type": "Edm.String", "searchable": true, "filterable": false, "sortable": false},
+    {"name": "title", "type": "Edm.String", "searchable": true, "filterable": false, "sortable": false},
+    {"name": "source", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "source_type", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "doc_type", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "citation", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false},
+    {"name": "cfr_title", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "cfr_part", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "cfr_section", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "document_number", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "document_url", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false},
+    {"name": "effective_date", "type": "Edm.DateTimeOffset", "searchable": false, "filterable": true, "sortable": true},
+    {"name": "chunk_index", "type": "Edm.Int32", "searchable": false, "filterable": false, "sortable": true},
+    {"name": "total_chunks", "type": "Edm.Int32", "searchable": false, "filterable": false, "sortable": false},
+    {"name": "parent_id", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "owner_fingerprint", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "uploaded_at", "type": "Edm.DateTimeOffset", "searchable": false, "filterable": true, "sortable": true},
+    {"name": "page_count", "type": "Edm.Int32", "searchable": false, "filterable": false, "sortable": false},
+    {"name": "file_hash", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false},
+    {"name": "file_name", "type": "Edm.String", "searchable": true, "filterable": false, "sortable": false},
+    {"name": "content_vector", "type": "Collection(Edm.Single)", "searchable": true, "dimensions": 1024, "vectorSearchProfile": "vector-profile"}
+  ],
+  "vectorSearch": {
+    "algorithms": [
+      {
+        "name": "hnsw-algorithm",
+        "kind": "hnsw",
+        "hnswParameters": {
+          "metric": "cosine",
+          "m": 4,
+          "efConstruction": 400,
+          "efSearch": 500
+        }
+      }
+    ],
+    "profiles": [
+      {
+        "name": "vector-profile",
+        "algorithm": "hnsw-algorithm"
+      }
+    ]
+  }
+}

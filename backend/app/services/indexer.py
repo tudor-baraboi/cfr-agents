@@ -37,36 +37,72 @@ async def generate_embedding(
     Returns:
         1024-dimensional embedding vector or None on error.
     """
+    results = await generate_embeddings_batch([text], input_type=input_type)
+    return results[0] if results else None
+
+
+async def generate_embeddings_batch(
+    texts: List[str],
+    input_type: str = "document",
+    batch_size: int = 20,
+) -> List[Optional[List[float]]]:
+    """
+    Generate embeddings for multiple texts in batches.
+    
+    Much faster than sequential calls - batches up to 20 texts per API call.
+    
+    Args:
+        texts: List of texts to embed
+        input_type: 'document' for indexing, 'query' for search queries
+        batch_size: Max texts per API call (Cohere limit is ~96, using 20 for safety)
+    
+    Returns:
+        List of embedding vectors (or None for failed texts)
+    """
     settings = get_settings()
     
     if not settings.azure_ai_services_endpoint or not settings.azure_ai_services_key:
         logger.warning("Azure AI Services not configured, skipping embeddings")
-        return None
+        return [None] * len(texts)
     
-    # Azure AI Model Inference API format for Cohere
-    url = f"{settings.azure_ai_services_endpoint}/models/embeddings?api-version=2024-05-01-preview"
+    endpoint = settings.azure_ai_services_endpoint.rstrip('/')
+    url = f"{endpoint}/models/embeddings?api-version=2024-05-01-preview"
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.azure_ai_services_key}",
-                    "Content-Type": "application/json",
-                    "extra-parameters": "pass-through",
-                },
-                json={
-                    "input": [text[:8000]],  # Truncate to fit model limit
-                    "model": settings.azure_ai_services_embedding_deployment,
-                    "input_type": input_type,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["data"][0]["embedding"]
-        except Exception as e:
-            logger.error(f"Embedding error: {e}")
-            return None
+    results: List[Optional[List[float]]] = []
+    
+    # Process in batches
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            truncated_batch = [t[:8000] for t in batch]  # Truncate each text
+            
+            try:
+                response = await client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {settings.azure_ai_services_key}",
+                        "Content-Type": "application/json",
+                        "extra-parameters": "pass-through",
+                    },
+                    json={
+                        "input": truncated_batch,
+                        "model": settings.azure_ai_services_embedding_deployment,
+                        "input_type": input_type,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                # Extract embeddings in order
+                for item in data["data"]:
+                    results.append(item["embedding"])
+                    
+            except Exception as e:
+                logger.error(f"Batch embedding error for batch {i//batch_size + 1}: {e}")
+                # Return None for this batch
+                results.extend([None] * len(batch))
+    
+    return results
 
 
 async def upload_to_index(doc: dict[str, Any], index_name: str | None = None) -> bool:

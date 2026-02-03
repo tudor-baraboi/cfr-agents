@@ -253,8 +253,8 @@ const App: Component = () => {
   const [quotaExhausted, setQuotaExhausted] = createSignal<QuotaExhaustedState | null>(null);
   const route = getRoute();
   
-  // Check for existing token on mount
-  onMount(() => {
+  // Check for existing token on mount and refresh usage stats
+  onMount(async () => {
     // For admin routes, use a separate session storage key
     const storageKey = route === 'chat' 
       ? `${branding.sessionStoragePrefix}-auth-token`
@@ -264,7 +264,43 @@ const App: Component = () => {
     
     if (token) {
       const isAdmin = route !== 'chat' || sessionStorage.getItem(`${branding.sessionStoragePrefix}-is-admin`) === 'true';
-      // We have a token - assume it's valid (will fail on WS connect if not)
+      
+      // For non-admin users, re-fetch usage stats from backend
+      if (!isAdmin && fingerprint) {
+        try {
+          const baseUrl = API_URL || window.location.origin;
+          const response = await fetch(`${baseUrl}/auth/fingerprint`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ visitor_id: fingerprint }),
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            setAuth({
+              token: data.token,  // Use fresh token
+              isAdmin: false,
+              requestsUsed: data.requests_used,
+              requestsRemaining: data.requests_remaining,
+              dailyLimit: data.daily_limit,
+              fingerprint,
+            });
+            // Update stored token with fresh one
+            sessionStorage.setItem(storageKey, data.token);
+            return;
+          } else if (response.status === 403) {
+            // Quota exhausted
+            const data = await response.json();
+            setQuotaExhausted({ exhausted: true, message: data.detail || 'Daily quota exhausted' });
+            sessionStorage.removeItem(storageKey);
+            return;
+          }
+        } catch (err) {
+          logger.warn('App', 'Failed to refresh usage stats', { error: err });
+        }
+      }
+      
+      // Fallback for admin users or if fetch failed
       setAuth({
         token,
         isAdmin,

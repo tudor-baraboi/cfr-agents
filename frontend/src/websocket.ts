@@ -73,7 +73,7 @@ export function createWebSocket(conversationId: string, token: string) {
             quotaUpdateHandler?.(quotaData.requests_used, quotaData.requests_remaining);
             return;
           }
-          logger.debug('ws', `Message: ${data.type}`, data.type === 'text' ? { preview: data.content.slice(0, 100) } : undefined);
+          logger.info('ws', `Message: ${data.type}`, data.type === 'text' ? { preview: data.content.slice(0, 100) } : undefined);
           eventHandler?.(data);
         } catch (error) {
           logger.error('ws', 'Failed to parse WebSocket message', { error, raw: event.data.slice(0, 200) });
