@@ -107,13 +107,13 @@ async def handle_conversation(
         # Use Anthropic Claude (default)
         if not settings.anthropic_api_key:
             yield {"type": "error", "content": "ANTHROPIC_API_KEY not configured"}
-            return
+        return
         model_id = f"anthropic/{settings.llm_model}"
         api_base = None  # Anthropic endpoint is handled by litellm
         logger.info(f"Using Anthropic model: {settings.llm_model}")
     
     # Configure litellm for logging and debugging
-    litellm.set_verbose(False)  # Set to True for debugging
+    litellm.set_verbose = False  # Set to True for debugging
     
     # Conversation-scoped cache for personal document content (for grounding)
     personal_doc_cache: dict[str, str] = {}

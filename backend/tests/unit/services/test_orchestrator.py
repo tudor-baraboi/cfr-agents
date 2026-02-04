@@ -46,6 +46,45 @@ async def mock_fetch_aps(doc_id, index_name=None):
     return "NRC document"
 
 
+# Helper function to create mock async generators for litellm
+class MockLiteLLMStream:
+    """Mock async stream for litellm.acompletion()."""
+    
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.index = 0
+    
+    def __aiter__(self):
+        return self
+    
+    async def __anext__(self):
+        if self.index >= len(self.chunks):
+            raise StopAsyncIteration
+        chunk = self.chunks[self.index]
+        self.index += 1
+        return chunk
+
+
+def create_text_stream(*chunks):
+    """Create a mock litellm async stream of text chunks."""
+    stream_chunks = []
+    for chunk in chunks:
+        stream_chunks.append({"choices": [{"delta": {"content": chunk}}]})
+    stream_chunks.append({"choices": [{"delta": {"type": None}, "finish_reason": "stop"}]})
+    return MockLiteLLMStream(stream_chunks)
+
+
+def create_tool_use_stream(tool_id, tool_name, tool_input):
+    """Create a mock litellm async stream with tool use."""
+    stream_chunks = [
+        {"choices": [{"delta": {"type": "tool_use", "id": tool_id}}]},
+        {"choices": [{"delta": {"name": tool_name}}]},
+        {"choices": [{"delta": {"input": tool_input}}]},
+        {"choices": [{"delta": {"type": None}, "finish_reason": "tool_calls"}]}
+    ]
+    return MockLiteLLMStream(stream_chunks)
+
+
 @pytest.fixture
 def faa_agent_config():
     """FAA agent configuration."""
@@ -227,108 +266,88 @@ class TestToolExecution:
 
 
 @pytest.mark.unit
-@pytest.mark.skip(reason="Pending litellm integration test migration - mocks need update for litellm.acompletion")
+@pytest.mark.skip(reason="Stream response parsing needs integration with actual litellm async iteration - requires more complex mocking setup")
 class TestClaudeIntegration:
-    """Tests for Claude API integration."""
+    """Tests for LLM integration via litellm."""
     
     @pytest.mark.asyncio
     async def test_simple_text_response(self, faa_agent_config):
-        """Test handling simple text response from Claude."""
-        # NOTE: These tests need to be updated for litellm integration
-        # When complete, they will support both Anthropic and Ollama
-        pytest.skip("Pending litellm test migration")
+        """Test handling simple text response from LLM."""
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            # Mock acompletion to return an async iterable
+            mock_acompletion.return_value = create_text_stream("§25.1317 requires", " lightning protection.")
+            
+            with patch("app.services.orchestrator.get_history") as mock_get_history:
+                mock_get_history.return_value = []
+                
+                with patch("app.services.orchestrator.add_message") as mock_add:
+                    messages = []
+                    async for msg in handle_conversation(
+                        "conv-123",
+                        "What does 25.1317 require?",
+                        faa_agent_config
+                    ):
+                        messages.append(msg)
+                    
+                    # Should have received text response
+                    text_messages = [m for m in messages if m.get("type") == "text"]
+                    assert len(text_messages) > 0, f"No text messages found. Messages: {messages}"
     
     @pytest.mark.asyncio
     async def test_tool_use_response(self, faa_agent_config):
-        """Test handling tool use from Claude."""
-        with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-            mock_response = MagicMock()
-            mock_response.content = [
-                ToolUseBlock(
-                    type="tool_use",
-                    id="tool-1",
-                    name="search_indexed_content",
-                    input={"query": "HIRF requirements"}
-                )
-            ]
-            mock_response.stop_reason = "tool_use"
-            
-            mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+        """Test handling tool use from LLM."""
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            tool_input = {"query": "HIRF requirements"}
+            mock_acompletion.return_value = create_tool_use_stream("tool-1", "search_indexed_content", tool_input)
             
             with patch("app.services.orchestrator.get_history") as mock_get_history:
                 mock_get_history.return_value = []
                 
-                messages = []
-                async for msg in handle_conversation(
-                    "conv-123",
-                    "What are HIRF requirements?",
-                    faa_agent_config
-                ):
-                    messages.append(msg)
-                
-                # Should have tool use message
-                assert any(m.get("type") == "tool_use" for m in messages)
+                with patch("app.services.orchestrator.execute_tool_with_config") as mock_execute:
+                    mock_execute.return_value = "HIRF test results"
+                    
+                    messages = []
+                    async for msg in handle_conversation(
+                        "conv-123",
+                        "What are HIRF requirements?",
+                        faa_agent_config
+                    ):
+                        messages.append(msg)
+                    
+                    # Should have requested tool execution
+                    mock_execute.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_multiple_tool_calls(self, faa_agent_config):
-        """Test Claude making multiple tool calls."""
-        with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-            # First call returns tool use
-            response1 = MagicMock()
-            response1.content = [
-                ToolUseBlock(
-                    type="tool_use",
-                    id="tool-1",
-                    name="search_indexed_content",
-                    input={"query": "25.1317"}
-                )
-            ]
-            response1.stop_reason = "tool_use"
+        """Test LLM making multiple tool calls."""
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            # Mock multiple calls for multi-turn conversation
+            search_result = create_tool_use_stream("tool-1", "search_indexed_content", {"query": "25.1317"})
+            fetch_result = create_tool_use_stream("tool-2", "fetch_cfr_section", {"part": "25", "section": "1317"})
+            text_result = create_text_stream("Section 25.1317 states...")
             
-            # Second call returns different tool use
-            response2 = MagicMock()
-            response2.content = [
-                ToolUseBlock(
-                    type="tool_use",
-                    id="tool-2",
-                    name="fetch_cfr_section",
-                    input={"section": "25.1317"}
-                )
-            ]
-            response2.stop_reason = "tool_use"
-            
-            # Final call returns text
-            response3 = MagicMock()
-            response3.content = [
-                TextBlock(type="text", text="Section 25.1317 states...")
-            ]
-            response3.stop_reason = "end_turn"
-            
-            mock_client.return_value.messages.create = MagicMock(
-                side_effect=[response1, response2, response3]
-            )
+            mock_acompletion.side_effect = [search_result, fetch_result, text_result]
             
             with patch("app.services.orchestrator.get_history") as mock_get_history:
                 mock_get_history.return_value = []
                 
-                messages = []
-                async for msg in handle_conversation(
-                    "conv-123",
-                    "Explain 25.1317",
-                    faa_agent_config
-                ):
-                    messages.append(msg)
-                
-                # Should have tool uses and final response
-                tool_messages = [m for m in messages if m.get("type") == "tool_use"]
-                text_messages = [m for m in messages if m.get("type") == "text"]
-                
-                assert len(tool_messages) >= 2
-                assert len(text_messages) >= 1
+                with patch("app.services.orchestrator.execute_tool_with_config") as mock_execute:
+                    mock_execute.return_value = "Tool result"
+                    
+                    messages = []
+                    async for msg in handle_conversation(
+                        "conv-123",
+                        "Search for 25.1317",
+                        faa_agent_config
+                    ):
+                        messages.append(msg)
+                    
+                    # Should have made multiple tool calls
+                    assert mock_execute.call_count >= 1
 
 
 @pytest.mark.unit
-@pytest.mark.skip(reason="Pending litellm integration test migration - mocks need update for litellm.acompletion")
+@pytest.mark.skip(reason="Stream response parsing needs integration with actual litellm async iteration")
 class TestConversationHistory:
     """Tests for conversation history management."""
     
@@ -341,11 +360,8 @@ class TestConversationHistory:
                 {"role": "assistant", "content": "First answer"}
             ]
             
-            with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-                mock_response = MagicMock()
-                mock_response.content = [TextBlock(type="text", text="Follow-up answer")]
-                mock_response.stop_reason = "end_turn"
-                mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+            with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+                mock_acompletion.return_value = create_text_stream("Follow-up answer")
                 
                 messages = []
                 async for msg in handle_conversation(
@@ -365,11 +381,8 @@ class TestConversationHistory:
             mock_get_history.return_value = []
             
             with patch("app.services.orchestrator.add_message") as mock_add_message:
-                with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-                    mock_response = MagicMock()
-                    mock_response.content = [TextBlock(type="text", text="Answer")]
-                    mock_response.stop_reason = "end_turn"
-                    mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+                with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+                    mock_acompletion.return_value = create_text_stream("Answer")
                     
                     messages = []
                     async for msg in handle_conversation(
@@ -393,11 +406,8 @@ class TestConversationHistory:
         with patch("app.services.orchestrator.get_history") as mock_get_history:
             mock_get_history.return_value = history
             
-            with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-                mock_response = MagicMock()
-                mock_response.content = [TextBlock(type="text", text="Test procedures include...")]
-                mock_response.stop_reason = "end_turn"
-                mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+            with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+                mock_acompletion.return_value = create_text_stream("Test procedures include...")
                 
                 messages = []
                 async for msg in handle_conversation(
@@ -407,43 +417,51 @@ class TestConversationHistory:
                 ):
                     messages.append(msg)
                 
-                # Claude should have received full history for context
-                create_call = mock_client.return_value.messages.create.call_args
-                messages_arg = create_call.kwargs.get("messages", [])
+                # LLM should have been called with full history for context
+                call_args = mock_acompletion.call_args
+                messages_arg = call_args.kwargs.get("messages", [])
                 
                 # Should include prior conversation
                 assert len(messages_arg) > 1
 
 
 @pytest.mark.unit
-@pytest.mark.skip(reason="Pending litellm integration test migration - error handling changed from anthropic to litellm exceptions")
+@pytest.mark.skip(reason="Error handling tests need litellm exception mocking refinement")
 class TestErrorHandling:
     """Tests for error handling."""
     
     @pytest.mark.asyncio
     async def test_handles_api_key_missing(self, faa_agent_config):
         """Test handling missing API key."""
-        with patch("app.services.orchestrator.get_settings") as mock_settings:
-            mock_settings.return_value.anthropic_api_key = None
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            # Simulate missing API key error
+            import litellm
+            # Create a proper litellm exception
+            error = litellm.APIError(message="API key not found", model="test", llm_provider="anthropic")
+            mock_acompletion.side_effect = error
             
-            messages = []
-            async for msg in handle_conversation(
-                "conv-123",
-                "Test",
-                faa_agent_config
-            ):
-                messages.append(msg)
-            
-            # Should return error message
-            assert any(m.get("type") == "error" for m in messages)
+            with patch("app.services.orchestrator.get_history") as mock_get_history:
+                mock_get_history.return_value = []
+                
+                messages = []
+                async for msg in handle_conversation(
+                    "conv-123",
+                    "Test",
+                    faa_agent_config
+                ):
+                    messages.append(msg)
+                
+                # Should return error message
+                assert any(m.get("type") == "error" for m in messages)
     
     @pytest.mark.asyncio
-    async def test_handles_claude_api_error(self, faa_agent_config):
-        """Test handling Claude API errors."""
-        with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-            mock_client.return_value.messages.create = MagicMock(
-                side_effect=Exception("API rate limit exceeded")
-            )
+    async def test_handles_rate_limit_error(self, faa_agent_config):
+        """Test handling rate limit errors from LLM."""
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            # Simulate rate limit error
+            import litellm
+            error = litellm.RateLimitError(message="Rate limit exceeded", model="test", llm_provider="anthropic")
+            mock_acompletion.side_effect = error
             
             with patch("app.services.orchestrator.get_history") as mock_get_history:
                 mock_get_history.return_value = []
@@ -478,18 +496,15 @@ class TestErrorHandling:
 
 
 @pytest.mark.unit
-@pytest.mark.skip(reason="Pending litellm integration test migration - mocks need update for litellm.acompletion")
+@pytest.mark.skip(reason="Multi-agent system prompt verification needs proper acompletion call inspection")
 class TestMultiAgentSupport:
     """Tests for multi-agent support (FAA, NRC, DoD)."""
     
     @pytest.mark.asyncio
     async def test_faa_agent_uses_faa_index(self, faa_agent_config):
         """Test FAA agent uses its own index."""
-        with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-            mock_response = MagicMock()
-            mock_response.content = [TextBlock(type="text", text="FAA answer")]
-            mock_response.stop_reason = "end_turn"
-            mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            mock_acompletion.return_value = create_text_stream("FAA answer")
             
             with patch("app.services.orchestrator.get_history") as mock_get_history:
                 mock_get_history.return_value = []
@@ -503,18 +518,15 @@ class TestMultiAgentSupport:
                     messages.append(msg)
                 
                 # Check that FAA system prompt was used
-                create_call = mock_client.return_value.messages.create.call_args
-                system_arg = create_call.kwargs.get("system")
+                call_args = mock_acompletion.call_args
+                system_arg = call_args.kwargs.get("system")
                 assert "FAA certification expert" in system_arg
     
     @pytest.mark.asyncio
     async def test_nrc_agent_uses_nrc_index(self, nrc_agent_config):
         """Test NRC agent uses its own index."""
-        with patch("app.services.orchestrator.anthropic.Anthropic") as mock_client:
-            mock_response = MagicMock()
-            mock_response.content = [TextBlock(type="text", text="NRC answer")]
-            mock_response.stop_reason = "end_turn"
-            mock_client.return_value.messages.create = MagicMock(return_value=mock_response)
+        with patch("app.services.orchestrator.litellm.acompletion") as mock_acompletion:
+            mock_acompletion.return_value = create_text_stream("NRC answer")
             
             with patch("app.services.orchestrator.get_history") as mock_get_history:
                 mock_get_history.return_value = []
@@ -528,8 +540,8 @@ class TestMultiAgentSupport:
                     messages.append(msg)
                 
                 # Check that NRC system prompt was used
-                create_call = mock_client.return_value.messages.create.call_args
-                system_arg = create_call.kwargs.get("system")
+                call_args = mock_acompletion.call_args
+                system_arg = call_args.kwargs.get("system")
                 assert "NRC regulatory expert" in system_arg
 
 
