@@ -10,7 +10,10 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "websockets>=13.0",
     
-    # Anthropic Claude API
+    # LLM Provider Abstraction
+    "litellm>=1.0.0",
+    
+    # Anthropic Claude API (used by litellm)
     "anthropic>=0.40.0",
     
     # HTTP Client for external APIs (eCFR, DRS)

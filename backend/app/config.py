@@ -5,9 +5,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
-    # Anthropic
+    # LLM Provider Configuration
+    # Use litellm format: "anthropic/model-name" or "ollama/model-name"
+    llm_provider: str = "anthropic"  # "anthropic" or "ollama"
+    llm_model: str = "claude-sonnet-4-5-20250929"  # Anthropic model
+    
+    # Anthropic (kept for backward compatibility)
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-5-20250929"
+    anthropic_model: str = "claude-sonnet-4-5-20250929"  # Deprecated: use llm_model
+    
+    # Ollama Configuration (for local models)
+    ollama_base_url: str = "http://localhost:11434"  # Ollama server endpoint
+    ollama_model: str = ""  # Empty = disabled, set to enable (e.g., "deepseek-coder", "neural-chat")
     
     # Azure AI Services (for embeddings - Cohere)
     azure_ai_services_endpoint: str = ""

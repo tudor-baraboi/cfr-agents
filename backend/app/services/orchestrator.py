@@ -1,8 +1,9 @@
 """
-Claude orchestration loop with tool calling.
+Claude orchestration loop with tool calling via litellm.
 
-This is the core of the agent: receives user messages, calls Claude,
-executes tools, and streams responses back.
+This is the core of the agent: receives user messages, calls Claude via litellm,
+executes tools, and streams responses back. Supports multiple LLM providers
+(Anthropic, Ollama) via litellm abstraction.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import inspect
 import logging
 from typing import AsyncIterator, Any, Optional
 
-import anthropic
+import litellm
 
 from app.config import get_settings
 from app.services.conversation import get_history, add_message
@@ -96,11 +97,23 @@ async def handle_conversation(
     """
     settings = get_settings()
     
-    if not settings.anthropic_api_key:
-        yield {"type": "error", "content": "ANTHROPIC_API_KEY not configured"}
-        return
+    # Determine which LLM provider to use
+    if settings.ollama_model:
+        # Use Ollama (local model)
+        model_id = f"ollama/{settings.ollama_model}"
+        api_base = settings.ollama_base_url
+        logger.info(f"Using Ollama model: {settings.ollama_model} at {api_base}")
+    else:
+        # Use Anthropic Claude (default)
+        if not settings.anthropic_api_key:
+            yield {"type": "error", "content": "ANTHROPIC_API_KEY not configured"}
+            return
+        model_id = f"anthropic/{settings.llm_model}"
+        api_base = None  # Anthropic endpoint is handled by litellm
+        logger.info(f"Using Anthropic model: {settings.llm_model}")
     
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # Configure litellm for logging and debugging
+    litellm.set_verbose(False)  # Set to True for debugging
     
     # Conversation-scoped cache for personal document content (for grounding)
     personal_doc_cache: dict[str, str] = {}
@@ -145,66 +158,107 @@ async def handle_conversation(
     iteration = 0
     while True:
         iteration += 1
-        logger.info(f"[iter={iteration}] Calling Claude with {len(messages)} messages")
+        logger.info(f"[iter={iteration}] Calling LLM with {len(messages)} messages")
         
         # Retry loop for transient API errors
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
-                # Stream response from Claude
+                # Stream response via litellm (supports both Anthropic and Ollama)
                 text_chunks = []
                 chunk_count = 0
                 
-                # Use Extended Thinking with interleaved thinking for reasoning between tool calls
-                # The beta header enables thinking blocks to appear after tool results, not just at start
-                async with client.messages.stream(
-                    model=settings.anthropic_model,
-                    max_tokens=16384,
-                    system=agent_config.system_prompt,
-                    messages=messages,
-                    tools=tool_definitions if tool_definitions else anthropic.NOT_GIVEN,
-                    thinking={
+                # Build API call parameters
+                api_params = {
+                    "model": model_id,
+                    "max_tokens": 16384,
+                    "system": agent_config.system_prompt,
+                    "messages": messages,
+                    "stream": True,
+                }
+                
+                # Add tools if available (works for both Anthropic and Ollama)
+                if tool_definitions:
+                    api_params["tools"] = tool_definitions
+                
+                # Extended thinking only for Anthropic/Claude
+                if "claude" in model_id.lower():
+                    api_params["thinking"] = {
                         "type": "enabled",
-                        "budget_tokens": 10000,  # Budget spans all thinking blocks with interleaved
-                    },
-                    extra_headers={
+                        "budget_tokens": 10000,
+                    }
+                    api_params["extra_headers"] = {
                         "anthropic-beta": "interleaved-thinking-2025-05-14"
-                    },
-                ) as stream:
-                    thinking_chunks = []
-                    
-                    # Meta-commentary filter with streaming:
-                    # Stream text normally for good UX, but track if we're in a text block.
-                    # If tool_use starts right after text, send a "clear_text" event to
-                    # tell the frontend to remove the meta-commentary we already streamed.
-                    current_text_block_chars = 0  # Track chars in current text block
-                    in_text_block = False
-                    
-                    async for event in stream:
-                        if event.type == "content_block_start":
-                            if hasattr(event.content_block, "type"):
-                                block_type = event.content_block.type
-                                if block_type == "thinking":
+                    }
+                
+                # Add Ollama API base if using local model
+                if api_base:
+                    api_params["api_base"] = api_base
+                
+                # Call LLM via litellm
+                stream_response = await litellm.acompletion(**api_params)
+                
+                thinking_chunks = []
+                
+                # Meta-commentary filter with streaming:
+                # Stream text normally for good UX, but track if we're in a text block.
+                # If tool_use starts right after text, send a "clear_text" event to
+                # tell the frontend to remove the meta-commentary we already streamed.
+                current_text_block_chars = 0  # Track chars in current text block
+                in_text_block = False
+                
+                async for event in stream_response:
+                    # litellm normalizes response format across providers
+                    if hasattr(event, 'choices') and event.choices:
+                        choice = event.choices[0]
+                        if hasattr(choice, 'delta'):
+                            delta = choice.delta
+                            
+                            # Handle content block start (from delta.type)
+                            if hasattr(delta, 'type'):
+                                block_type = delta.type
+                                if block_type == "thinking_start":
                                     logger.debug(f"[iter={iteration}] Thinking block starting")
                                     current_text_block_chars = 0
                                     in_text_block = False
-                                elif block_type == "text":
+                                elif block_type == "text_start":
                                     logger.debug(f"[iter={iteration}] Text block starting")
                                     current_text_block_chars = 0
                                     in_text_block = True
-                                elif block_type == "tool_use":
-                                    logger.info(f"[iter={iteration}] Tool use starting: {event.content_block.name}")
+                                elif block_type == "tool_use_start":
+                                    logger.info(f"[iter={iteration}] Tool use starting")
                                     # Tool use right after text = meta-commentary
-                                    # Tell frontend to clear the text we just streamed
                                     if current_text_block_chars > 0:
                                         logger.info(f"[iter={iteration}] Sending clear_text for {current_text_block_chars} chars of meta-commentary")
                                         yield {"type": "clear_text", "chars": current_text_block_chars}
                                     current_text_block_chars = 0
                                     in_text_block = False
-                                    yield {
-                                        "type": "tool_start",
-                                        "tool": event.content_block.name,
-                                    }
+                            
+                            # Handle text content
+                            if hasattr(delta, 'text') and delta.text:
+                                text = delta.text
+                                current_text_block_chars += len(text)
+                                text_chunks.append(text)
+                                yield {
+                                    "type": "text",
+                                    "content": text,
+                                }
+                            
+                            # Handle thinking content (Anthropic only)
+                            if hasattr(delta, 'thinking') and delta.thinking:
+                                thinking_chunks.append(delta.thinking)
+                                yield {
+                                    "type": "thinking",
+                                    "content": delta.thinking,
+                                }
+                            
+                            # Handle tool use input (partial for streaming)
+                            if hasattr(delta, 'input') and delta.input:
+                                # Tool input JSON being streamed
+                                yield {
+                                    "type": "tool_input_chunk",
+                                    "content": delta.input,
+                                }
                         
                         elif event.type == "content_block_delta":
                             if hasattr(event.delta, "type"):
@@ -261,43 +315,47 @@ async def handle_conversation(
                 last_error = None
                 break
                 
-            except anthropic.APIStatusError as e:
+            except (litellm.RateLimitError, litellm.APIError) as e:
                 last_error = e
-                # Retry on overloaded (529) or rate limit (429) errors
-                if e.status_code in (429, 529) and attempt < MAX_RETRIES - 1:
+                # Retry on rate limit errors
+                status_code = getattr(e, 'status_code', None)
+                if isinstance(e, litellm.RateLimitError) and attempt < MAX_RETRIES - 1:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"Claude API overloaded/rate limited (status {e.status_code}), retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                    logger.warning(f"LLM API rate limited, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                    yield {"type": "text", "content": f"\n\n*API busy, retrying in {int(delay)}s...*\n\n"}
+                    await asyncio.sleep(delay)
+                    continue
+                elif status_code in (429, 529) and attempt < MAX_RETRIES - 1:
+                    # Handle other rate limit/overload statuses
+                    delay = BASE_RETRY_DELAY * (2 ** attempt)
+                    logger.warning(f"LLM API overloaded (status {status_code}), retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     yield {"type": "text", "content": f"\n\n*API busy, retrying in {int(delay)}s...*\n\n"}
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    logger.error(f"Claude API error: {e}")
-                    yield {"type": "error", "content": f"Claude API error: {e.message}"}
+                    error_msg = str(e)
+                    logger.error(f"LLM API error: {error_msg}")
+                    yield {"type": "error", "content": f"LLM API error: {error_msg}"}
                     return
                     
-            except anthropic.APIError as e:
+            except litellm.APIConnectionError as e:
                 last_error = e
-                # Check if the error body indicates an overloaded error (can come without status code)
-                is_overloaded = False
-                if hasattr(e, 'body') and isinstance(e.body, dict):
-                    error_info = e.body.get('error', {})
-                    if isinstance(error_info, dict) and error_info.get('type') == 'overloaded_error':
-                        is_overloaded = True
-                
-                if is_overloaded and attempt < MAX_RETRIES - 1:
+                # Retry on connection errors (e.g., Ollama server down)
+                if attempt < MAX_RETRIES - 1:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"Claude API overloaded (from body), retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
-                    yield {"type": "text", "content": f"\n\n*API busy, retrying in {int(delay)}s...*\n\n"}
+                    logger.warning(f"LLM API connection error, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                    yield {"type": "text", "content": f"\n\n*Connection error, retrying in {int(delay)}s...*\n\n"}
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    logger.error(f"Claude API error: {e}")
-                    yield {"type": "error", "content": f"Claude API error: {e}"}
-                return
+                    logger.error(f"LLM API connection error: {e}")
+                    yield {"type": "error", "content": f"LLM API connection error: {str(e)}"}
+                    return
         
         # If we exhausted retries with an error
         if last_error:
-            yield {"type": "error", "content": f"Claude API unavailable after {MAX_RETRIES} retries: {last_error.message}"}
+            error_msg = getattr(last_error, 'message', str(last_error))
+            yield {"type": "error", "content": f"LLM API unavailable after {MAX_RETRIES} retries: {error_msg}"}
             return
         
         # Check for tool calls
