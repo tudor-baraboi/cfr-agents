@@ -1,13 +1,29 @@
-"""Quick WebSocket test for the FAA Agent."""
+"""Quick WebSocket test for the FAA Agent with litellm tool calling."""
 
 import asyncio
 import json
 import sys
+import httpx
 import websockets
 
 
+async def get_auth_token() -> str:
+    """Get JWT token via fingerprint endpoint."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://127.0.0.1:8000/auth/fingerprint",
+            json={"visitor_id": "test-fingerprint-123"}
+        )
+        response.raise_for_status()
+        return response.json()["token"]
+
+
 async def test_chat(user_message: str):
-    uri = "ws://127.0.0.1:8000/ws/chat/test-123"
+    # Get auth token first
+    token = await get_auth_token()
+    print(f"Got auth token: {token[:20]}...")
+    
+    uri = f"ws://127.0.0.1:8000/ws/chat/test-conv-123?token={token}&agent=faa"
     
     async with websockets.connect(uri) as ws:
         # Send a test message
@@ -22,12 +38,14 @@ async def test_chat(user_message: str):
             
             if data["type"] == "text":
                 print(data["content"], end="", flush=True)
+            elif data["type"] == "ping":
+                pass  # Ignore keep-alive pings
             elif data["type"] == "tool_start":
                 print(f"\n[Calling tool: {data['tool']}]")
             elif data["type"] == "tool_executing":
-                print(f"[Executing: {data['tool']} with {data['input']}]")
+                print(f"\n[Executing: {data['tool']}]")
             elif data["type"] == "tool_result":
-                print(f"[Tool result received: {len(data['result'])} chars]\n")
+                print(f"\n[Tool result received: {len(data.get('result', ''))} chars]\n")
             elif data["type"] == "done":
                 print("\n\n>>> Done")
                 break

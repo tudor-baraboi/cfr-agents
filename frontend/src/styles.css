@@ -1241,6 +1241,25 @@ body {
   text-align: center;
 }
 
+.admin-table .admin-row {
+  background: rgba(139, 92, 246, 0.05);
+}
+
+.admin-badge {
+  display: inline-block;
+  background: #7c3aed;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-right: 6px;
+  font-family: system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+
 /* Feedback Cards */
 .admin-feedback-list {
   flex: 1;

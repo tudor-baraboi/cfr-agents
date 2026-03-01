@@ -1,15 +1,20 @@
 """
-Claude orchestration loop with tool calling via litellm.
+LLM orchestration loop with tool calling via litellm.
 
-This is the core of the agent: receives user messages, calls Claude via litellm,
+This is the core of the agent: receives user messages, calls LLM via litellm,
 executes tools, and streams responses back. Supports multiple LLM providers
-(Anthropic, Ollama) via litellm abstraction.
+(Anthropic, Ollama, OpenAI, etc.) via litellm abstraction.
+
+Key for Ollama tool calling:
+- Use 'ollama_chat/' prefix (not 'ollama/') for proper tool support
+- Non-streaming is more reliable for tool calls with Ollama
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 from typing import AsyncIterator, Any, Optional
 
@@ -65,7 +70,6 @@ async def execute_tool_with_config(
             logger.debug(f"Injected personal_doc_cache into {name}")
         
         result = await tool_func(**input_data)
-        # Ensure non-empty result (Claude API requires non-empty text content blocks)
         result_str = str(result) if result else ""
         if not result_str.strip():
             result_str = f"Tool {name} completed but returned no content."
@@ -73,6 +77,21 @@ async def execute_tool_with_config(
     except Exception as e:
         logger.error(f"Tool {name} failed: {e}")
         return f"Error executing {name}: {e}"
+
+
+def convert_tools_to_openai_format(tool_definitions: list[dict]) -> list[dict]:
+    """Convert Anthropic-style tool definitions to OpenAI function calling format."""
+    openai_tools = []
+    for tool in tool_definitions:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+            }
+        })
+    return openai_tools
 
 
 async def handle_conversation(
@@ -84,46 +103,36 @@ async def handle_conversation(
     """
     Main orchestration loop:
     1. Load conversation history
-    2. Call Claude with tools
+    2. Call LLM with tools
     3. Execute any tool calls
     4. Stream responses back
     5. Save messages to history
-    
-    Args:
-        conversation_id: Unique conversation identifier
-        user_message: The user's message
-        agent_config: Configuration for the agent (system prompt, tools, etc.)
-        fingerprint: User's browser fingerprint (for personal document isolation)
     """
     settings = get_settings()
     
     # Determine which LLM provider to use
-    if settings.ollama_model:
-        # Use Ollama (local model)
-        model_id = f"ollama/{settings.ollama_model}"
+    use_ollama = bool(settings.ollama_model)
+    if use_ollama:
+        # Use ollama_chat/ prefix for proper tool calling support
+        model_id = f"ollama_chat/{settings.ollama_model}"
         api_base = settings.ollama_base_url
         logger.info(f"Using Ollama model: {settings.ollama_model} at {api_base}")
     else:
-        # Use Anthropic Claude (default)
         if not settings.anthropic_api_key:
             yield {"type": "error", "content": "ANTHROPIC_API_KEY not configured"}
-        return
+            return
         model_id = f"anthropic/{settings.llm_model}"
-        api_base = None  # Anthropic endpoint is handled by litellm
+        api_base = None
         logger.info(f"Using Anthropic model: {settings.llm_model}")
     
-    # Configure litellm for logging and debugging
-    litellm.set_verbose = False  # Set to True for debugging
-    
-    # Conversation-scoped cache for personal document content (for grounding)
+    system_prompt = agent_config.system_prompt
+    litellm.set_verbose = False
     personal_doc_cache: dict[str, str] = {}
     
-    # Load conversation history and add user message
     messages = get_history(conversation_id).copy()
     messages.append({"role": "user", "content": user_message})
     
-    # Estimate token count and warn if approaching limit
-    # Rough approximation: ~4 chars per token (conservative estimate)
+    # Token estimation
     def estimate_tokens(msgs: list, system: str) -> int:
         total_chars = len(system)
         for msg in msgs:
@@ -133,264 +142,256 @@ async def handle_conversation(
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
-                        # Tool results can be nested
                         total_chars += len(str(block))
         return total_chars // 4
     
-    estimated_tokens = estimate_tokens(messages, agent_config.system_prompt)
-    TOKEN_WARNING_THRESHOLD = 150000
-    TOKEN_LIMIT = 200000
-    
-    if estimated_tokens > TOKEN_WARNING_THRESHOLD:
-        warning_pct = int((estimated_tokens / TOKEN_LIMIT) * 100)
+    estimated_tokens = estimate_tokens(messages, system_prompt)
+    if estimated_tokens > 150000:
+        warning_pct = int((estimated_tokens / 200000) * 100)
         yield {
             "type": "warning",
-            "content": f"⚠️ This conversation is using ~{warning_pct}% of the context limit ({estimated_tokens:,} / {TOKEN_LIMIT:,} tokens). Consider starting a new conversation to avoid errors."
+            "content": f"Context is {warning_pct}% full. Consider starting a new conversation."
         }
-        logger.warning(f"Conversation {conversation_id} approaching token limit: ~{estimated_tokens:,} tokens")
     
-    # Get tools from agent config
-    tool_definitions = agent_config.tool_definitions if agent_config.tool_definitions else None
+    # Convert tools to OpenAI format
+    tool_definitions = None
+    if agent_config.tool_definitions:
+        tool_definitions = convert_tools_to_openai_format(agent_config.tool_definitions)
     
     logger.info(f"[agent={agent_config.name}] Starting conversation {conversation_id}")
     
-    # Tool execution loop
+    all_text_chunks = []
     iteration = 0
-    while True:
+    max_iterations = 10
+    
+    while iteration < max_iterations:
         iteration += 1
         logger.info(f"[iter={iteration}] Calling LLM with {len(messages)} messages")
         
-        # Retry loop for transient API errors
         last_error = None
+        text_chunks = []
+        tool_calls = []
+        finish_reason = None
+        
         for attempt in range(MAX_RETRIES):
             try:
-                # Stream response via litellm (supports both Anthropic and Ollama)
-                text_chunks = []
                 chunk_count = 0
                 
-                # Build API call parameters
+                # Build API params - unified for all providers via litellm
                 api_params = {
                     "model": model_id,
                     "max_tokens": 16384,
-                    "system": agent_config.system_prompt,
-                    "messages": messages,
-                    "stream": True,
+                    "messages": [{"role": "system", "content": system_prompt}] + messages,
+                    "timeout": settings.llm_request_timeout_seconds,
                 }
                 
-                # Add tools if available (works for both Anthropic and Ollama)
                 if tool_definitions:
                     api_params["tools"] = tool_definitions
+                    # Force tool use on first turn for Ollama (small models need encouragement)
+                    if use_ollama and iteration == 1:
+                        api_params["tool_choice"] = "required"
+                    else:
+                        api_params["tool_choice"] = "auto"
                 
-                # Extended thinking only for Anthropic/Claude
-                if "claude" in model_id.lower():
-                    api_params["thinking"] = {
-                        "type": "enabled",
-                        "budget_tokens": 10000,
-                    }
-                    api_params["extra_headers"] = {
-                        "anthropic-beta": "interleaved-thinking-2025-05-14"
-                    }
-                
-                # Add Ollama API base if using local model
-                if api_base:
+                # Provider-specific settings
+                if use_ollama:
                     api_params["api_base"] = api_base
+                    # Non-streaming is more reliable for Ollama tool calls
+                    api_params["stream"] = not bool(tool_definitions)
+                else:
+                    # Anthropic: enable extended thinking and streaming
+                    api_params["stream"] = True
+                    if "anthropic" in model_id.lower() or "claude" in model_id.lower():
+                        api_params["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                        api_params["extra_headers"] = {"anthropic-beta": "interleaved-thinking-2025-05-14"}
                 
-                # Call LLM via litellm
-                stream_response = await litellm.acompletion(**api_params)
-                
-                thinking_chunks = []
-                
-                # Meta-commentary filter with streaming:
-                # Stream text normally for good UX, but track if we're in a text block.
-                # If tool_use starts right after text, send a "clear_text" event to
-                # tell the frontend to remove the meta-commentary we already streamed.
-                current_text_block_chars = 0  # Track chars in current text block
-                in_text_block = False
-                
-                async for event in stream_response:
-                    # litellm normalizes response format across providers
-                    if hasattr(event, 'choices') and event.choices:
-                        choice = event.choices[0]
-                        if hasattr(choice, 'delta'):
-                            delta = choice.delta
-                            
-                            # Handle content block start (from delta.type)
-                            if hasattr(delta, 'type'):
-                                block_type = delta.type
-                                if block_type == "thinking_start":
-                                    logger.debug(f"[iter={iteration}] Thinking block starting")
-                                    current_text_block_chars = 0
-                                    in_text_block = False
-                                elif block_type == "text_start":
-                                    logger.debug(f"[iter={iteration}] Text block starting")
-                                    current_text_block_chars = 0
-                                    in_text_block = True
-                                elif block_type == "tool_use_start":
-                                    logger.info(f"[iter={iteration}] Tool use starting")
-                                    # Tool use right after text = meta-commentary
-                                    if current_text_block_chars > 0:
-                                        logger.info(f"[iter={iteration}] Sending clear_text for {current_text_block_chars} chars of meta-commentary")
-                                        yield {"type": "clear_text", "chars": current_text_block_chars}
-                                    current_text_block_chars = 0
-                                    in_text_block = False
-                            
-                            # Handle text content
-                            if hasattr(delta, 'text') and delta.text:
-                                text = delta.text
-                                current_text_block_chars += len(text)
-                                text_chunks.append(text)
-                                yield {
-                                    "type": "text",
-                                    "content": text,
-                                }
-                            
-                            # Handle thinking content (Anthropic only)
-                            if hasattr(delta, 'thinking') and delta.thinking:
-                                thinking_chunks.append(delta.thinking)
-                                yield {
-                                    "type": "thinking",
-                                    "content": delta.thinking,
-                                }
-                            
-                            # Handle tool use input (partial for streaming)
-                            if hasattr(delta, 'input') and delta.input:
-                                # Tool input JSON being streamed
-                                yield {
-                                    "type": "tool_input_chunk",
-                                    "content": delta.input,
-                                }
-                        
-                        elif event.type == "content_block_delta":
-                            if hasattr(event.delta, "type"):
-                                delta_type = event.delta.type
-                                logger.debug(f"[iter={iteration}] Delta type: {delta_type}")
-                                if delta_type == "thinking_delta":
-                                    # Extended Thinking: reasoning content
-                                    thinking_text = event.delta.thinking
-                                    thinking_chunks.append(thinking_text)
-                                    print(f"!!!THINKING!!! iter={iteration} len={len(thinking_text)}", flush=True)
-                                    logger.info(f"[iter={iteration}] Yielding thinking chunk: {len(thinking_text)} chars")
-                                    yield {"type": "thinking", "content": thinking_text}
-                                elif delta_type == "signature_delta":
-                                    # Signature for thinking block verification (required for preservation)
-                                    logger.debug(f"[iter={iteration}] Received thinking block signature")
-                                elif delta_type == "text_delta":
-                                    # Stream text immediately for good UX
-                                    chunk_count += 1
-                                    text = event.delta.text
-                                    text_chunks.append(text)
-                                    if in_text_block:
-                                        current_text_block_chars += len(text)
-                                    yield {"type": "text", "content": text}
-                                elif delta_type == "input_json_delta":
-                                    yield {"type": "tool_input", "partial": event.delta.partial_json}
-                        
-                        elif event.type == "content_block_stop":
-                            # Text block ended - reset counter but keep the value
-                            # (we need it if tool_use starts next)
-                            if not in_text_block:
-                                current_text_block_chars = 0
-                            in_text_block = False
-                        
-                        elif event.type == "message_stop":
-                            # Reset for next iteration
-                            current_text_block_chars = 0
-                            logger.info(f"[iter={iteration}] Message stopped")
-                        
-                    response = await stream.get_final_message()
+                if api_params.get("stream", False):
+                    # Streaming mode (Anthropic, or Ollama without tools)
+                    stream_response = await litellm.acompletion(**api_params)
                     
-                    # Log thinking summary
-                    total_thinking = "".join(thinking_chunks)
-                    if total_thinking:
-                        logger.info(f"[iter={iteration}] Thinking: {len(total_thinking)} chars")
+                    current_tool_call = None
+                    tool_call_args = ""
+                    
+                    stream_iter = stream_response.__aiter__()
+                    while True:
+                        try:
+                            event = await asyncio.wait_for(
+                                stream_iter.__anext__(),
+                                timeout=settings.llm_stream_chunk_timeout_seconds,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            logger.error("LLM stream timeout")
+                            yield {"type": "error", "content": "LLM response timed out."}
+                            return
+                        
+                        if hasattr(event, 'choices') and event.choices:
+                            choice = event.choices[0]
+                            
+                            if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                                finish_reason = choice.finish_reason
+                            
+                            if hasattr(choice, 'delta'):
+                                delta = choice.delta
+                                
+                                content = getattr(delta, 'content', None)
+                                if content:
+                                    chunk_count += 1
+                                    text_chunks.append(content)
+                                    all_text_chunks.append(content)
+                                    yield {"type": "text", "content": content}
+                                
+                                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                    for tc in delta.tool_calls:
+                                        if tc.id:
+                                            if current_tool_call and tool_call_args:
+                                                try:
+                                                    current_tool_call["arguments"] = json.loads(tool_call_args)
+                                                except json.JSONDecodeError:
+                                                    current_tool_call["arguments"] = {"raw": tool_call_args}
+                                                tool_calls.append(current_tool_call)
+                                            
+                                            current_tool_call = {
+                                                "id": tc.id,
+                                                "name": tc.function.name if tc.function else None,
+                                                "arguments": {}
+                                            }
+                                            tool_call_args = ""
+                                            logger.info(f"[iter={iteration}] Tool call: {current_tool_call['name']}")
+                                        
+                                        if tc.function and tc.function.name and current_tool_call:
+                                            current_tool_call["name"] = tc.function.name
+                                        
+                                        if tc.function and tc.function.arguments:
+                                            tool_call_args += tc.function.arguments
+                    
+                    if current_tool_call:
+                        if tool_call_args:
+                            try:
+                                current_tool_call["arguments"] = json.loads(tool_call_args)
+                            except json.JSONDecodeError:
+                                current_tool_call["arguments"] = {"raw": tool_call_args}
+                        tool_calls.append(current_tool_call)
                 
-                # Log response details
-                total_text = "".join(text_chunks)
-                output_tokens = response.usage.output_tokens if hasattr(response, 'usage') else 'unknown'
-                logger.info(f"[iter={iteration}] Stream complete: {chunk_count} chunks, {len(total_text)} chars, output_tokens={output_tokens}, stop_reason={response.stop_reason}")
-                if response.stop_reason == "max_tokens":
-                    logger.warning(f"[iter={iteration}] Response truncated due to max_tokens! output_tokens={output_tokens}")
+                else:
+                    # Non-streaming mode (Ollama with tools - more reliable)
+                    response = await litellm.acompletion(**api_params)
+                    
+                    message = response.choices[0].message
+                    finish_reason = response.choices[0].finish_reason
+                    
+                    # Extract text content
+                    if message.content:
+                        text_chunks.append(message.content)
+                        all_text_chunks.append(message.content)
+                        yield {"type": "text", "content": message.content}
+                        chunk_count = 1
+                    
+                    # Extract tool calls
+                    if hasattr(message, 'tool_calls') and message.tool_calls:
+                        for tc in message.tool_calls:
+                            tool_call = {
+                                "id": tc.id or f"call_{iteration}_{len(tool_calls)}",
+                                "name": tc.function.name,
+                                "arguments": {},
+                            }
+                            # Parse arguments
+                            if tc.function.arguments:
+                                if isinstance(tc.function.arguments, str):
+                                    try:
+                                        tool_call["arguments"] = json.loads(tc.function.arguments)
+                                    except json.JSONDecodeError:
+                                        tool_call["arguments"] = {"raw": tc.function.arguments}
+                                else:
+                                    tool_call["arguments"] = tc.function.arguments
+                            logger.info(f"[iter={iteration}] Tool call: {tool_call['name']}")
+                            tool_calls.append(tool_call)
                 
-                # Success - break out of retry loop
+                logger.info(f"[iter={iteration}] Complete: {chunk_count} chunks, {len(tool_calls)} tools, finish={finish_reason}")
                 last_error = None
                 break
                 
             except (litellm.RateLimitError, litellm.APIError) as e:
                 last_error = e
-                # Retry on rate limit errors
-                status_code = getattr(e, 'status_code', None)
-                if isinstance(e, litellm.RateLimitError) and attempt < MAX_RETRIES - 1:
+                if attempt < MAX_RETRIES - 1:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"LLM API rate limited, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
-                    yield {"type": "text", "content": f"\n\n*API busy, retrying in {int(delay)}s...*\n\n"}
+                    logger.warning(f"API error, retrying in {delay}s")
+                    yield {"type": "text", "content": f"\n\n*Retrying in {int(delay)}s...*\n\n"}
                     await asyncio.sleep(delay)
-                    continue
-                elif status_code in (429, 529) and attempt < MAX_RETRIES - 1:
-                    # Handle other rate limit/overload statuses
-                    delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"LLM API overloaded (status {status_code}), retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
-                    yield {"type": "text", "content": f"\n\n*API busy, retrying in {int(delay)}s...*\n\n"}
-                    await asyncio.sleep(delay)
-                    continue
                 else:
-                    error_msg = str(e)
-                    logger.error(f"LLM API error: {error_msg}")
-                    yield {"type": "error", "content": f"LLM API error: {error_msg}"}
+                    logger.error(f"API error: {e}")
+                    yield {"type": "error", "content": f"API error: {e}"}
                     return
                     
             except litellm.APIConnectionError as e:
                 last_error = e
-                # Retry on connection errors (e.g., Ollama server down)
                 if attempt < MAX_RETRIES - 1:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning(f"LLM API connection error, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-                    yield {"type": "text", "content": f"\n\n*Connection error, retrying in {int(delay)}s...*\n\n"}
+                    logger.warning(f"Connection error, retrying: {e}")
+                    yield {"type": "text", "content": "\n\n*Connection error, retrying...*\n\n"}
                     await asyncio.sleep(delay)
-                    continue
                 else:
-                    logger.error(f"LLM API connection error: {e}")
-                    yield {"type": "error", "content": f"LLM API connection error: {str(e)}"}
+                    logger.error(f"Connection error: {e}")
+                    yield {"type": "error", "content": f"Connection error: {e}"}
                     return
         
-        # If we exhausted retries with an error
         if last_error:
-            error_msg = getattr(last_error, 'message', str(last_error))
-            yield {"type": "error", "content": f"LLM API unavailable after {MAX_RETRIES} retries: {error_msg}"}
+            yield {"type": "error", "content": f"API unavailable after {MAX_RETRIES} retries"}
             return
         
-        # Check for tool calls
-        tool_uses = [block for block in response.content if block.type == "tool_use"]
-        
-        if not tool_uses:
-            # No tools called, we're done
+        # Only break if no tool calls - ignore finish_reason for tool-capable models
+        if not tool_calls:
+            logger.info(f"[iter={iteration}] Conversation complete (no tool calls)")
             break
         
-        # Add assistant message to history
-        messages.append({"role": "assistant", "content": response.content})
+        # Add assistant message with tool calls
+        assistant_message = {
+            "role": "assistant",
+            "content": "".join(text_chunks) if text_chunks else None,
+            "tool_calls": [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["arguments"]) if isinstance(tc["arguments"], dict) else str(tc["arguments"])
+                    }
+                }
+                for tc in tool_calls
+            ]
+        }
+        messages.append(assistant_message)
         
-        # Execute tools and collect results
-        tool_results = []
-        for tool_use in tool_uses:
-            logger.info(f"Executing tool: {tool_use.name}")
-            yield {"type": "tool_executing", "tool": tool_use.name, "input": tool_use.input}
+        # Execute tools
+        for tool_call in tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["arguments"]
+            tool_id = tool_call["id"]
+            
+            logger.info(f"Executing tool: {tool_name}")
+            yield {"type": "tool_executing", "tool": tool_name, "input": tool_args}
             
             result = await execute_tool_with_config(
-                tool_use.name, tool_use.input, agent_config, fingerprint, personal_doc_cache
+                tool_name, tool_args, agent_config, fingerprint, personal_doc_cache
             )
             
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_id,
                 "content": result,
             })
             
-            yield {"type": "tool_result", "tool": tool_use.name, "result": result[:500]}  # Truncate for UI
+            result_preview = result[:500] + "..." if len(result) > 500 else result
+            yield {"type": "tool_result", "tool": tool_name, "result": result_preview}
         
-        # Add tool results to continue conversation
-        messages.append({"role": "user", "content": tool_results})
+        text_chunks = []
     
-    # Save final conversation state
+    if iteration >= max_iterations:
+        yield {"type": "warning", "content": "Max iterations reached."}
+    
+    final_text = "".join(all_text_chunks)
     add_message(conversation_id, {"role": "user", "content": user_message})
-    add_message(conversation_id, {"role": "assistant", "content": response.content})
+    add_message(conversation_id, {"role": "assistant", "content": final_text})
     
     logger.info(f"Conversation {conversation_id} completed")

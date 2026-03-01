@@ -143,6 +143,7 @@ def admin_jwt_token(test_settings) -> str:
     
     payload = {
         "fingerprint": "admin-fingerprint-456",
+        "code": "TEST-ADMIN-123",
         "is_admin": True,
         "exp": datetime.now(timezone.utc) + timedelta(hours=1),
         "iat": datetime.now(timezone.utc),

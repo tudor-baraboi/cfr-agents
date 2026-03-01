@@ -5,6 +5,17 @@ import { getVisitorId } from './fingerprint';
 
 // Backend API URL
 const API_URL = import.meta.env.VITE_API_URL || '';
+const REQUEST_TIMEOUT_MS = 10000;
+
+async function fetchWithTimeout(url: string, options: RequestInit) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 /**
  * Login modes:
@@ -42,7 +53,7 @@ const Login: Component<LoginProps> = (props) => {
       setStatus('Authenticating...');
       
       const baseUrl = API_URL || window.location.origin;
-      const response = await fetch(`${baseUrl}/auth/fingerprint`, {
+      const response = await fetchWithTimeout(`${baseUrl}/auth/fingerprint`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -75,7 +86,11 @@ const Login: Component<LoginProps> = (props) => {
       });
     } catch (err) {
       console.error('Auto-auth error:', err);
-      setError('Failed to connect. Please try again.');
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('Request timed out. Please try again.');
+      } else {
+        setError('Failed to connect. Please try again.');
+      }
       setIsLoading(false);
     }
   });
@@ -105,7 +120,7 @@ const Login: Component<LoginProps> = (props) => {
       }
 
       const baseUrl = API_URL || window.location.origin;
-      const response = await fetch(`${baseUrl}/auth/validate-code`, {
+      const response = await fetchWithTimeout(`${baseUrl}/auth/validate-code`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -144,7 +159,11 @@ const Login: Component<LoginProps> = (props) => {
       });
     } catch (err) {
       console.error('Login error:', err);
-      setError('Failed to connect. Please try again.');
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('Request timed out. Please try again.');
+      } else {
+        setError('Failed to connect. Please try again.');
+      }
     } finally {
       setIsLoading(false);
     }

@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     # Use litellm format: "anthropic/model-name" or "ollama/model-name"
     llm_provider: str = "anthropic"  # "anthropic" or "ollama"
     llm_model: str = "claude-sonnet-4-5-20250929"  # Anthropic model
+    llm_request_timeout_seconds: float = 90.0  # Timeout for LLM requests
+    llm_stream_chunk_timeout_seconds: float = 30.0  # Timeout per streamed chunk
     
     # Anthropic (kept for backward compatibility)
     anthropic_api_key: str = ""
