@@ -91,6 +91,7 @@ class UsageTracker:
         fingerprint: str, 
         user_agent: str = "",
         ip_address: str | None = None,
+        is_admin: bool = False,
     ) -> int:
         """
         Increment today's request count for a fingerprint.
@@ -117,6 +118,8 @@ class UsageTracker:
             )
             entity["RequestCount"] = entity.get("RequestCount", 0) + 1
             entity["LastRequestAt"] = now
+            if is_admin:
+                entity["IsAdmin"] = True
             # Update IP/location if we have it and it's not already set
             if ip_address and not entity.get("IPAddress"):
                 entity["IPAddress"] = ip_address
@@ -135,6 +138,7 @@ class UsageTracker:
                 "FirstRequestAt": now,
                 "LastRequestAt": now,
                 "UserAgent": user_agent[:500] if user_agent else "",
+                "IsAdmin": is_admin,
             }
             if ip_address:
                 entity["IPAddress"] = ip_address
@@ -191,6 +195,7 @@ class UsageTracker:
                 "ip_address": entity.get("IPAddress", ""),
                 "country": entity.get("Country", ""),
                 "city": entity.get("City", ""),
+                "is_admin": entity.get("IsAdmin", False),
             })
         
         # Sort by date descending, then by last_request_at descending
