@@ -107,7 +107,7 @@ async def handle_conversation(
         # Use Anthropic Claude (default)
         if not settings.anthropic_api_key:
             yield {"type": "error", "content": "ANTHROPIC_API_KEY not configured"}
-        return
+            return
         model_id = f"anthropic/{settings.llm_model}"
         api_base = None  # Anthropic endpoint is handled by litellm
         logger.info(f"Using Anthropic model: {settings.llm_model}")
