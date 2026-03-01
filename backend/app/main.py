@@ -183,17 +183,21 @@ async def websocket_chat(
                 
                 turn_completed = True
                 
-                # Increment usage counter and send quota update (non-admin only)
+                # Track usage for all users (admin and non-admin)
+                # Use fingerprint for regular users, admin code for admin users
+                usage_id = fingerprint or code or "unknown"
+                new_count = await tracker.increment_usage(
+                    usage_id,
+                    user_agent=user_agent,
+                    ip_address=client_ip,
+                    is_admin=is_admin,
+                )
+                
                 if not is_admin:
-                    new_count = await tracker.increment_usage(
-                        fingerprint, 
-                        user_agent=user_agent,
-                        ip_address=client_ip,
-                    )
+                    # Send quota update to non-admin users
                     remaining = max(0, settings.daily_request_limit - new_count)
                     logger.info(f"Turn completed for {user_id}...: {new_count}/{settings.daily_request_limit} used, {remaining} remaining")
                     
-                    # Send quota update to frontend
                     if websocket.client_state == WebSocketState.CONNECTED:
                         await websocket.send_json({
                             "type": "quota_update",
@@ -201,6 +205,8 @@ async def websocket_chat(
                             "requests_remaining": remaining,
                             "daily_limit": settings.daily_request_limit,
                         })
+                else:
+                    logger.info(f"Admin turn completed for {user_id}...: {new_count} requests today")
                 
                 # Signal end of response (if still connected)
                 if websocket.client_state == WebSocketState.CONNECTED:

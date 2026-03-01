@@ -36,6 +36,7 @@ interface UsageRecord {
   ip_address: string;
   country: string;
   city: string;
+  is_admin: boolean;
 }
 
 interface FeedbackRecord {
@@ -201,7 +202,7 @@ const AdminDashboard: Component<{ token: string }> = (props) => {
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Fingerprint</th>
+                <th>User</th>
                 <th>Requests</th>
                 <th>First</th>
                 <th>Last</th>
@@ -212,9 +213,12 @@ const AdminDashboard: Component<{ token: string }> = (props) => {
             <tbody>
               <For each={usageData()}>
                 {(record) => (
-                  <tr>
+                  <tr class={record.is_admin ? 'admin-row' : ''}>
                     <td>{record.date}</td>
-                    <td class="mono">{truncate(record.fingerprint, 12)}</td>
+                    <td class="mono">
+                      {record.is_admin && <span class="admin-badge">admin</span>}
+                      {truncate(record.fingerprint, 12)}
+                    </td>
                     <td class="center">{record.request_count}</td>
                     <td>{formatDateTime(record.first_request_at)}</td>
                     <td>{formatDateTime(record.last_request_at)}</td>
